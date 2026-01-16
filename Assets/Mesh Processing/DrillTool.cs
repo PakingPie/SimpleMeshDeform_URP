@@ -2,7 +2,7 @@ using UnityEngine;
 
 /// <summary>
 /// Represents a cylindrical drill tool that can carve into grindable meshes.
-/// The drill projects vertices inside its cylinder outward to the surface.
+/// Vertices inside the cylinder are pushed along the drill axis to create a hole.
 /// </summary>
 public class DrillTool : MonoBehaviour
 {
@@ -24,6 +24,21 @@ public class DrillTool : MonoBehaviour
     [Tooltip("Custom drilling depth (only used if useConfigurableDepth is true)")]
     [SerializeField] private float configurableDepth = 0.5f;
 
+    [Header("Drilling Mode")]
+    [Tooltip("How vertices are displaced when inside the drill cylinder")]
+    [SerializeField] private DrillMode drillMode = DrillMode.PushAlongAxis;
+
+    [Header("Progressive Drilling")]
+    [Tooltip("How fast vertices are pushed per frame")]
+    [SerializeField] private float pushSpeed = 0.01f;
+
+    [Tooltip("Additional radial push to smooth hole edges (0 = no radial push)")]
+    [SerializeField] private float radialSmoothingSpeed = 0.002f;
+
+    [Header("Detection")]
+    [Tooltip("Margin inside the radius to detect vertices")]
+    [SerializeField] private float surfaceMargin = 0.001f;
+
     [Header("Debug Visualization")]
     [SerializeField] private bool showDebugCylinder = true;
     [SerializeField] private Color cylinderColor = new Color(0f, 1f, 0f, 0.5f);
@@ -39,24 +54,40 @@ public class DrillTool : MonoBehaviour
         NegativeZ
     }
 
-    /// <summary>
-    /// Gets the drill radius.
-    /// </summary>
+    public enum DrillMode
+    {
+        /// <summary>
+        /// Push vertices along the drill axis (opposite to drill direction).
+        /// Creates a proper hole by moving material "out" of the drill path.
+        /// </summary>
+        PushAlongAxis,
+        
+        /// <summary>
+        /// Push vertices radially outward to the cylinder surface.
+        /// Only works for initial contact, not for deepening holes.
+        /// </summary>
+        PushRadially,
+        
+        /// <summary>
+        /// Instantly project vertices to the nearest exit point.
+        /// </summary>
+        InstantProject
+    }
+
+    // Properties
     public float Radius => radius;
-
-    /// <summary>
-    /// Gets the effective drill length/depth.
-    /// </summary>
     public float EffectiveLength => useConfigurableDepth ? configurableDepth : length;
-
-    /// <summary>
-    /// Gets the full cylinder length.
-    /// </summary>
     public float Length => length;
+    public DrillMode Mode => drillMode;
+    public float PushSpeed => pushSpeed;
+    public float RadialSmoothingSpeed => radialSmoothingSpeed;
+    public float SurfaceMargin => surfaceMargin;
+    
+    // Legacy properties for compatibility
+    public bool UseProgressiveDrilling => drillMode != DrillMode.InstantProject;
+    public float RadialPushSpeed => radialSmoothingSpeed;
+    public float AxialPushSpeed => pushSpeed;
 
-    /// <summary>
-    /// Gets the world-space direction the drill is pointing (from base to tip).
-    /// </summary>
     public Vector3 DrillDirection
     {
         get
@@ -75,18 +106,13 @@ public class DrillTool : MonoBehaviour
     }
 
     /// <summary>
-    /// Gets the world-space position of the drill base (opposite end from tip).
+    /// Direction material should be pushed (opposite to drill direction).
     /// </summary>
-    public Vector3 DrillBase => transform.position;
+    public Vector3 PushDirection => -DrillDirection;
 
-    /// <summary>
-    /// Gets the world-space position of the drill tip.
-    /// </summary>
+    public Vector3 DrillBase => transform.position;
     public Vector3 DrillTip => transform.position + DrillDirection * EffectiveLength;
 
-    /// <summary>
-    /// Gets the local axis index (0=X, 1=Y, 2=Z) and sign for the drill direction.
-    /// </summary>
     public (int axisIndex, float sign) GetLocalAxisInfo()
     {
         switch (drillAxis)
@@ -102,144 +128,180 @@ public class DrillTool : MonoBehaviour
     }
 
     /// <summary>
-    /// Transforms a world point to drill-local space where:
-    /// - The drill axis is always the local Y axis
-    /// - Y=0 is at the drill base, Y=length is at the tip
-    /// </summary>
-    public Vector3 WorldToDrillSpace(Vector3 worldPoint)
-    {
-        // First transform to object local space
-        Vector3 localPoint = transform.InverseTransformPoint(worldPoint);
-
-        // Then rotate so drill axis becomes Y
-        var (axisIndex, sign) = GetLocalAxisInfo();
-
-        Vector3 drillSpacePoint;
-        switch (axisIndex)
-        {
-            case 0: // X axis
-                drillSpacePoint = new Vector3(localPoint.y, localPoint.x * sign, localPoint.z);
-                break;
-            case 1: // Y axis
-                drillSpacePoint = new Vector3(localPoint.x, localPoint.y * sign, localPoint.z);
-                break;
-            case 2: // Z axis
-                drillSpacePoint = new Vector3(localPoint.x, localPoint.z * sign, localPoint.y);
-                break;
-            default:
-                drillSpacePoint = localPoint;
-                break;
-        }
-
-        return drillSpacePoint;
-    }
-
-    /// <summary>
-    /// Transforms a drill-space point back to world space.
-    /// </summary>
-    public Vector3 DrillSpaceToWorld(Vector3 drillSpacePoint)
-    {
-        var (axisIndex, sign) = GetLocalAxisInfo();
-
-        Vector3 localPoint;
-        switch (axisIndex)
-        {
-            case 0: // X axis
-                localPoint = new Vector3(drillSpacePoint.y * sign, drillSpacePoint.x, drillSpacePoint.z);
-                break;
-            case 1: // Y axis
-                localPoint = new Vector3(drillSpacePoint.x, drillSpacePoint.y * sign, drillSpacePoint.z);
-                break;
-            case 2: // Z axis
-                localPoint = new Vector3(drillSpacePoint.x, drillSpacePoint.z, drillSpacePoint.y * sign);
-                break;
-            default:
-                localPoint = drillSpacePoint;
-                break;
-        }
-
-        return transform.TransformPoint(localPoint);
-    }
-
-    /// <summary>
     /// Checks if a world-space point is inside the drill cylinder.
     /// </summary>
     public bool IsPointInsideCylinder(Vector3 worldPoint)
     {
-        Vector3 drillSpace = WorldToDrillSpace(worldPoint);
-
-        // Check height bounds (0 to effective length)
-        if (drillSpace.y < 0 || drillSpace.y > EffectiveLength)
+        Vector3 basePos = DrillBase;
+        Vector3 direction = DrillDirection;
+        
+        Vector3 toPoint = worldPoint - basePos;
+        float height = Vector3.Dot(toPoint, direction);
+        
+        if (height < 0 || height > EffectiveLength)
             return false;
-
-        // Check radial distance
-        float radialDistSqr = drillSpace.x * drillSpace.x + drillSpace.z * drillSpace.z;
-        return radialDistSqr < radius * radius;
+        
+        Vector3 axialComponent = direction * height;
+        Vector3 radialVector = toPoint - axialComponent;
+        float radialDistSqr = radialVector.sqrMagnitude;
+        
+        float effectiveRadius = radius - surfaceMargin;
+        return radialDistSqr < effectiveRadius * effectiveRadius;
     }
 
     /// <summary>
-    /// Projects a point inside the cylinder to the cylinder surface.
-    /// Returns the original point if it's outside the cylinder.
+    /// Projects/pushes a point inside the cylinder based on the current drill mode.
     /// </summary>
-    /// <param name="worldPoint">The world-space point to project</param>
-    /// <param name="wasProjected">True if the point was inside and got projected</param>
+    /// <param name="worldPoint">The world-space point to process</param>
+    /// <param name="wasProjected">True if the point was inside and got modified</param>
     public Vector3 ProjectToSurface(Vector3 worldPoint, out bool wasProjected)
     {
-        Vector3 drillSpace = WorldToDrillSpace(worldPoint);
-
-        // Check height bounds
-        if (drillSpace.y < 0 || drillSpace.y > EffectiveLength)
+        Vector3 basePos = DrillBase;
+        Vector3 direction = DrillDirection;
+        
+        // Vector from drill base to the point
+        Vector3 toPoint = worldPoint - basePos;
+        
+        // Project onto drill axis to get height along cylinder
+        float height = Vector3.Dot(toPoint, direction);
+        
+        // Check height bounds (must be between base and tip)
+        if (height < 0 || height > EffectiveLength)
         {
             wasProjected = false;
             return worldPoint;
         }
-
-        // Check radial distance
-        float radialDistSqr = drillSpace.x * drillSpace.x + drillSpace.z * drillSpace.z;
-        float radiusSqr = radius * radius;
-
-        if (radialDistSqr >= radiusSqr)
+        
+        // Get the radial vector (perpendicular to drill axis)
+        Vector3 axialComponent = direction * height;
+        Vector3 radialVector = toPoint - axialComponent;
+        float radialDistSqr = radialVector.sqrMagnitude;
+        
+        // Detection radius
+        float detectionRadius = radius - surfaceMargin;
+        float detectionRadiusSqr = detectionRadius * detectionRadius;
+        
+        if (radialDistSqr >= detectionRadiusSqr)
         {
             wasProjected = false;
             return worldPoint;
         }
-
-        // Point is inside cylinder - project to surface
+        
+        // Point is inside cylinder
         wasProjected = true;
-
+        
         float radialDist = Mathf.Sqrt(radialDistSqr);
+        
+        switch (drillMode)
+        {
+            case DrillMode.PushAlongAxis:
+                return CalculateAxialPush(worldPoint, basePos, direction, radialVector, radialDist, height);
+            
+            case DrillMode.PushRadially:
+                return CalculateRadialPush(worldPoint, basePos, direction, axialComponent, radialVector, radialDist, height);
+            
+            case DrillMode.InstantProject:
+                return CalculateInstantProjection(worldPoint, basePos, direction, axialComponent, radialVector, radialDist, height);
+            
+            default:
+                return worldPoint;
+        }
+    }
 
-        // Handle case where point is exactly on the axis
+    /// <summary>
+    /// Pushes vertex along the drill axis (out of the hole).
+    /// This is the main drilling method that creates proper holes.
+    /// </summary>
+    private Vector3 CalculateAxialPush(Vector3 worldPoint, Vector3 basePos, Vector3 direction,
+        Vector3 radialVector, float radialDist, float height)
+    {
+        Vector3 result = worldPoint;
+        
+        // Main push: along the opposite direction of drilling (push material OUT)
+        // Vertices closer to the tip get pushed more (they're "freshly contacted")
+        float normalizedHeight = height / EffectiveLength;
+        
+        // Push strength increases toward the tip
+        // At tip (height = EffectiveLength, normalizedHeight = 1): full push
+        // At base (height = 0, normalizedHeight = 0): minimal push
+        float axialPushStrength = pushSpeed * (0.5f + normalizedHeight * 0.5f);
+        
+        // Push in the direction opposite to drilling (toward the base/exit)
+        result += PushDirection * axialPushStrength;
+        
+        // Optional: slight radial smoothing for vertices near the edge
+        // This helps create smoother hole walls
+        if (radialSmoothingSpeed > 0 && radialDist > 0.0001f)
+        {
+            // Only apply radial smoothing to vertices near the cylinder edge
+            float edgeProximity = radialDist / radius; // 0 at center, ~1 at edge
+            
+            if (edgeProximity > 0.7f)
+            {
+                Vector3 radialDirection = radialVector / radialDist;
+                float radialPush = radialSmoothingSpeed * (edgeProximity - 0.7f) / 0.3f;
+                result += radialDirection * radialPush;
+            }
+        }
+        
+        return result;
+    }
+
+    /// <summary>
+    /// Pushes vertex radially outward (old method, kept for compatibility).
+    /// </summary>
+    private Vector3 CalculateRadialPush(Vector3 worldPoint, Vector3 basePos, Vector3 direction,
+        Vector3 axialComponent, Vector3 radialVector, float radialDist, float height)
+    {
+        Vector3 result = worldPoint;
+        
+        float penetrationDepth = radius - radialDist;
+        float normalizedPenetration = penetrationDepth / radius;
+        
         if (radialDist < 0.0001f)
         {
-            // Push in arbitrary direction (positive X in drill space)
-            drillSpace.x = radius;
-            drillSpace.z = 0;
+            Vector3 perpendicular = GetArbitraryPerpendicular(direction);
+            result += perpendicular * pushSpeed;
         }
         else
         {
-            // Scale outward to radius
-            float scale = radius / radialDist;
-            drillSpace.x *= scale;
-            drillSpace.z *= scale;
+            Vector3 radialDirection = radialVector / radialDist;
+            float radialPush = pushSpeed * (1f + normalizedPenetration);
+            result += radialDirection * radialPush;
         }
-
-        return DrillSpaceToWorld(drillSpace);
+        
+        return result;
     }
 
     /// <summary>
-    /// Projects a point to the cylinder surface, with bounds clamping.
+    /// Instantly projects vertex to the nearest exit point.
+    /// For drilling, this means projecting to the base plane.
     /// </summary>
-    /// <param name="worldPoint">The world-space point to project</param>
-    /// <param name="originalBounds">The original mesh bounds in world space</param>
-    /// <param name="wasProjected">True if the point was inside and got projected</param>
+    private Vector3 CalculateInstantProjection(Vector3 worldPoint, Vector3 basePos, Vector3 direction,
+        Vector3 axialComponent, Vector3 radialVector, float radialDist, float height)
+    {
+        // Project to the base plane (exit of the drill hole)
+        // The vertex stays at its radial position but moves to height = 0
+        Vector3 basePoint = basePos + radialVector;
+        return basePoint;
+    }
+
+    private Vector3 GetArbitraryPerpendicular(Vector3 direction)
+    {
+        Vector3 perpendicular = Vector3.Cross(direction, Vector3.up);
+        if (perpendicular.sqrMagnitude < 0.001f)
+        {
+            perpendicular = Vector3.Cross(direction, Vector3.right);
+        }
+        return perpendicular.normalized;
+    }
+
     public Vector3 ProjectToSurfaceClamped(Vector3 worldPoint, Bounds originalBounds, out bool wasProjected)
     {
         Vector3 projected = ProjectToSurface(worldPoint, out wasProjected);
 
         if (wasProjected)
         {
-            // Clamp to original mesh bounds
             projected.x = Mathf.Clamp(projected.x, originalBounds.min.x, originalBounds.max.x);
             projected.y = Mathf.Clamp(projected.y, originalBounds.min.y, originalBounds.max.y);
             projected.z = Mathf.Clamp(projected.z, originalBounds.min.z, originalBounds.max.z);
@@ -253,12 +315,14 @@ public class DrillTool : MonoBehaviour
         radius = Mathf.Max(0.001f, radius);
         length = Mathf.Max(0.001f, length);
         configurableDepth = Mathf.Clamp(configurableDepth, 0.001f, length);
+        pushSpeed = Mathf.Max(0.0001f, pushSpeed);
+        radialSmoothingSpeed = Mathf.Max(0f, radialSmoothingSpeed);
+        surfaceMargin = Mathf.Clamp(surfaceMargin, 0.0001f, radius * 0.1f);
     }
 
     private void OnDrawGizmos()
     {
         if (!showDebugCylinder) return;
-
         DrawCylinderGizmo();
     }
 
@@ -275,7 +339,6 @@ public class DrillTool : MonoBehaviour
         Vector3 tipCenter = DrillTip;
         Vector3 direction = DrillDirection;
 
-        // Get perpendicular vectors for drawing circles
         Vector3 perpendicular1 = Vector3.Cross(direction, Vector3.up).normalized;
         if (perpendicular1.sqrMagnitude < 0.001f)
         {
@@ -283,11 +346,9 @@ public class DrillTool : MonoBehaviour
         }
         Vector3 perpendicular2 = Vector3.Cross(direction, perpendicular1).normalized;
 
-        // Draw circles at base and tip
         DrawCircle(baseCenter, perpendicular1, perpendicular2, radius);
         DrawCircle(tipCenter, perpendicular1, perpendicular2, radius);
 
-        // Draw lines connecting the circles
         for (int i = 0; i < 8; i++)
         {
             float angle = i * Mathf.PI * 2f / 8f;
@@ -295,9 +356,20 @@ public class DrillTool : MonoBehaviour
             Gizmos.DrawLine(baseCenter + offset, tipCenter + offset);
         }
 
-        // Draw direction arrow
+        // Draw drill direction arrow (yellow)
         Gizmos.color = Color.yellow;
         Gizmos.DrawLine(tipCenter, tipCenter + direction * 0.1f);
+        
+        // Draw push direction arrow (cyan) - direction material moves
+        Gizmos.color = Color.cyan;
+        Vector3 pushDir = PushDirection;
+        Gizmos.DrawLine(baseCenter, baseCenter + pushDir * 0.15f);
+        
+        // Draw detection radius
+        Gizmos.color = new Color(1f, 0.5f, 0f, 0.3f);
+        float detectionRadius = radius - surfaceMargin;
+        DrawCircle(baseCenter, perpendicular1, perpendicular2, detectionRadius);
+        DrawCircle(tipCenter, perpendicular1, perpendicular2, detectionRadius);
     }
 
     private void DrawCircle(Vector3 center, Vector3 axis1, Vector3 axis2, float circleRadius)

@@ -14,13 +14,17 @@ int vertexCount;
 float drillRadius;
 float drillLength;
 
-// Drill transform matrices
-float4x4 drillWorldToLocal;
-float4x4 drillLocalToWorld;
+// Drill base position and direction (world space)
+float3 drillBasePos;
+float3 drillDirection;
 
-// Drill axis configuration (0=X, 1=Y, 2=Z)
-int drillAxisIndex;
-float drillAxisSign;
+// Drill mode: 0 = PushAlongAxis, 1 = PushRadially, 2 = InstantProject
+int drillMode;
+
+// Push speeds
+float pushSpeed;
+float radialSmoothingSpeed;
+float surfaceMargin;
 
 // Bounds clamping
 float3 boundsMin;
@@ -30,58 +34,25 @@ int enforceBounds;
 #define THREAD_GROUP_SIZE 256
 #define EPSILON 0.0001
 
-// Transform world point to drill space where Y is always the drill axis
-float3 WorldToDrillSpace(float3 worldPos)
-{
-    // Transform to drill's local space
-    float4 localPos4 = mul(drillWorldToLocal, float4(worldPos, 1.0));
-    float3 localPos = localPos4.xyz;
-    
-    // Remap so drill axis becomes Y
-    float3 drillSpace;
-    
-    if (drillAxisIndex == 0) // X axis
-    {
-        drillSpace = float3(localPos.y, localPos.x * drillAxisSign, localPos.z);
-    }
-    else if (drillAxisIndex == 1) // Y axis
-    {
-        drillSpace = float3(localPos.x, localPos.y * drillAxisSign, localPos.z);
-    }
-    else // Z axis
-    {
-        drillSpace = float3(localPos.x, localPos.z * drillAxisSign, localPos.y);
-    }
-    
-    return drillSpace;
-}
-
-// Transform drill space point back to world space
-float3 DrillSpaceToWorld(float3 drillSpace)
-{
-    float3 localPos;
-    
-    if (drillAxisIndex == 0) // X axis
-    {
-        localPos = float3(drillSpace.y * drillAxisSign, drillSpace.x, drillSpace.z);
-    }
-    else if (drillAxisIndex == 1) // Y axis
-    {
-        localPos = float3(drillSpace.x, drillSpace.y * drillAxisSign, drillSpace.z);
-    }
-    else // Z axis
-    {
-        localPos = float3(drillSpace.x, drillSpace.z, drillSpace.y * drillAxisSign);
-    }
-    
-    float4 worldPos4 = mul(drillLocalToWorld, float4(localPos, 1.0));
-    return worldPos4.xyz;
-}
+#define MODE_PUSH_ALONG_AXIS 0
+#define MODE_PUSH_RADIALLY 1
+#define MODE_INSTANT_PROJECT 2
 
 // Clamp position to bounds
 float3 ClampToBounds(float3 pos)
 {
     return clamp(pos, boundsMin, boundsMax);
+}
+
+// Get an arbitrary perpendicular vector
+float3 GetArbitraryPerpendicular(float3 dir)
+{
+    float3 perp = cross(dir, float3(0, 1, 0));
+    if (dot(perp, perp) < 0.001)
+    {
+        perp = cross(dir, float3(1, 0, 0));
+    }
+    return normalize(perp);
 }
 
 [numthreads(THREAD_GROUP_SIZE, 1, 1)]
@@ -96,39 +67,77 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float3 worldPos = vertex.xyz;
     float affected = 0.0;
     
-    // Transform to drill space
-    float3 drillSpace = WorldToDrillSpace(worldPos);
+    // Vector from drill base to the point
+    float3 toPoint = worldPos - drillBasePos;
     
-    // Check if within drill length (Y axis in drill space)
-    bool withinLength = drillSpace.y >= 0.0 && drillSpace.y <= drillLength;
+    // Project onto drill axis to get height along cylinder
+    float height = dot(toPoint, drillDirection);
     
-    if (withinLength)
+    // Check if within drill length
+    if (height >= 0.0 && height <= drillLength)
     {
-        // Calculate radial distance (XZ plane in drill space)
-        float radialDistSqr = drillSpace.x * drillSpace.x + drillSpace.z * drillSpace.z;
-        float radiusSqr = drillRadius * drillRadius;
+        // Get the radial vector (perpendicular to drill axis)
+        float3 axialComponent = drillDirection * height;
+        float3 radialVector = toPoint - axialComponent;
+        float radialDistSqr = dot(radialVector, radialVector);
         
-        if (radialDistSqr < radiusSqr)
+        // Use detection radius (slightly smaller than actual radius)
+        float detectionRadius = drillRadius - surfaceMargin;
+        float detectionRadiusSqr = detectionRadius * detectionRadius;
+        
+        if (radialDistSqr < detectionRadiusSqr)
         {
-            // Point is inside cylinder - project to surface
+            // Point is inside cylinder
             float radialDist = sqrt(radialDistSqr);
+            float3 projectedPoint = worldPos;
             
-            if (radialDist < EPSILON)
+            // Push direction is opposite to drill direction
+            float3 pushDirection = -drillDirection;
+            
+            if (drillMode == MODE_PUSH_ALONG_AXIS)
             {
-                // Point is on axis - push in arbitrary direction
-                drillSpace.x = drillRadius;
-                drillSpace.z = 0.0;
+                // Main push along axis (out of the hole)
+                float normalizedHeight = height / drillLength;
+                float axialPushStrength = pushSpeed * (0.5 + normalizedHeight * 0.5);
+                projectedPoint += pushDirection * axialPushStrength;
+                
+                // Optional radial smoothing near edges
+                if (radialSmoothingSpeed > 0.0 && radialDist > EPSILON)
+                {
+                    float edgeProximity = radialDist / drillRadius;
+                    if (edgeProximity > 0.7)
+                    {
+                        float3 radialDirection = radialVector / radialDist;
+                        float radialPush = radialSmoothingSpeed * (edgeProximity - 0.7) / 0.3;
+                        projectedPoint += radialDirection * radialPush;
+                    }
+                }
             }
-            else
+            else if (drillMode == MODE_PUSH_RADIALLY)
             {
-                // Scale outward to radius
-                float scale = drillRadius / radialDist;
-                drillSpace.x *= scale;
-                drillSpace.z *= scale;
+                // Push radially outward
+                float penetrationDepth = drillRadius - radialDist;
+                float normalizedPenetration = penetrationDepth / drillRadius;
+                
+                if (radialDist < EPSILON)
+                {
+                    float3 perpendicular = GetArbitraryPerpendicular(drillDirection);
+                    projectedPoint += perpendicular * pushSpeed;
+                }
+                else
+                {
+                    float3 radialDirection = radialVector / radialDist;
+                    float radialPush = pushSpeed * (1.0 + normalizedPenetration);
+                    projectedPoint += radialDirection * radialPush;
+                }
+            }
+            else if (drillMode == MODE_INSTANT_PROJECT)
+            {
+                // Instant project to base plane
+                projectedPoint = drillBasePos + radialVector;
             }
             
-            // Transform back to world space
-            worldPos = DrillSpaceToWorld(drillSpace);
+            worldPos = projectedPoint;
             
             // Apply bounds clamping if enabled
             if (enforceBounds > 0)

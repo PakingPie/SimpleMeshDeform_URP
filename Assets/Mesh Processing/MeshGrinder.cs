@@ -416,6 +416,12 @@ public class MeshGrinder : MonoBehaviour
 
     private int PerformDrillingGPU(GrindableObject grindable)
     {
+        if (!drillComputeInitialized)
+        {
+            Debug.LogWarning("Drilling compute shader not initialized, falling back to CPU");
+            return grindable.ApplyDrilling(drillTool);
+        }
+
         Vector3[] vertices = grindable.GetVertices();
         int vertexCount = vertices.Length;
         if (vertexCount == 0) return 0;
@@ -441,34 +447,22 @@ public class MeshGrinder : MonoBehaviour
         drillingComputeShader.SetFloat("drillRadius", drillTool.Radius);
         drillingComputeShader.SetFloat("drillLength", drillTool.EffectiveLength);
 
-        Matrix4x4 drillWorldToLocal = drillTool.transform.worldToLocalMatrix;
-        Matrix4x4 drillLocalToWorld = drillTool.transform.localToWorldMatrix;
-        drillingComputeShader.SetMatrix("drillWorldToLocal", drillWorldToLocal);
-        drillingComputeShader.SetMatrix("drillLocalToWorld", drillLocalToWorld);
+        // Pass world-space drill parameters
+        Vector3 drillBase = drillTool.DrillBase;
+        Vector3 drillDir = drillTool.DrillDirection;
+        drillingComputeShader.SetVector("drillBasePos", new Vector4(drillBase.x, drillBase.y, drillBase.z, 0));
+        drillingComputeShader.SetVector("drillDirection", new Vector4(drillDir.x, drillDir.y, drillDir.z, 0));
 
-        var (axisIndex, axisSign) = drillTool.GetLocalAxisInfo();
-        drillingComputeShader.SetInt("drillAxisIndex", axisIndex);
-        drillingComputeShader.SetFloat("drillAxisSign", axisSign);
-        drillingComputeShader.SetVector("drillDirection", drillTool.DrillDirection);
+        // Drill mode and speeds
+        drillingComputeShader.SetInt("drillMode", (int)drillTool.Mode);
+        drillingComputeShader.SetFloat("pushSpeed", drillTool.PushSpeed);
+        drillingComputeShader.SetFloat("radialSmoothingSpeed", drillTool.RadialSmoothingSpeed);
+        drillingComputeShader.SetFloat("surfaceMargin", drillTool.SurfaceMargin);
 
-        // BVH for mesh-accurate bounds
-        bool useBVH = grindable.UseBVHBounds && grindable.EnforceOriginalBounds && grindable.LinearBVH != null;
-        drillingComputeShader.SetInt("useBVH", useBVH ? 1 : 0);
-
-        if (useBVH)
-        {
-            grindable.LinearBVH.CreateBuffers(out bvhNodeBuffer, out bvhTriangleBuffer);
-            if (bvhNodeBuffer != null)
-            {
-                drillingComputeShader.SetBuffer(drillKernelHandle, "bvhNodes", bvhNodeBuffer);
-                drillingComputeShader.SetBuffer(drillKernelHandle, "bvhTriangles", bvhTriangleBuffer);
-                drillingComputeShader.SetInt("bvhNodeCount", grindable.LinearBVH.NodeCount);
-            }
-        }
-
+        // Bounds
         Bounds bounds = grindable.OriginalWorldBounds;
-        drillingComputeShader.SetVector("boundsMin", bounds.min);
-        drillingComputeShader.SetVector("boundsMax", bounds.max);
+        drillingComputeShader.SetVector("boundsMin", new Vector4(bounds.min.x, bounds.min.y, bounds.min.z, 0));
+        drillingComputeShader.SetVector("boundsMax", new Vector4(bounds.max.x, bounds.max.y, bounds.max.z, 0));
         drillingComputeShader.SetInt("enforceBounds", grindable.EnforceOriginalBounds ? 1 : 0);
 
         int threadGroups = Mathf.CeilToInt(vertexCount / (float)THREAD_GROUP_SIZE);

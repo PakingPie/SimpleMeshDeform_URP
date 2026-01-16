@@ -132,7 +132,7 @@ GameObject:
   - component: {fileID: 264452393}
   - component: {fileID: 264452391}
   m_Layer: 0
-  m_Name: Cylinder
+  m_Name: DrillTool
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -150,11 +150,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: fa1ad7bb4e4253d4a928f931d199fc5c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::DrillTool
-  radius: 0.2
+  radius: 0.05
   length: 0.5
   drillAxis: 3
   useConfigurableDepth: 0
   configurableDepth: 0.5
+  drillMode: 0
+  pushSpeed: 0.01
+  radialSmoothingSpeed: 0.002
+  surfaceMargin: 0.001
   showDebugCylinder: 1
   cylinderColor: {r: 0, g: 1, b: 0, a: 0.5}
   debugSegments: 32
@@ -224,7 +228,7 @@ Transform:
   m_GameObject: {fileID: 264452390}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0.038, y: 1.622, z: 0}
+  m_LocalPosition: {x: 1.116, y: 0.819, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -508,7 +512,7 @@ GameObject:
   - component: {fileID: 595500348}
   - component: {fileID: 595500347}
   m_Layer: 0
-  m_Name: Cube
+  m_Name: GrindTool
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -707,11 +711,11 @@ MonoBehaviour:
   grindTool: {fileID: 595500347}
   drillTool: {fileID: 264452391}
   grindableObjects:
-  - {fileID: 1994714071}
-  currentMode: 0
+  - {fileID: 7064674431178529123}
+  currentMode: 1
   grindingComputeShader: {fileID: 7200000, guid: 7ddae552202fb4b45a7fa67ce0fc339c, type: 3}
   drillingComputeShader: {fileID: 7200000, guid: 760d2920d4de4e046a4043e8e33bcfc5, type: 3}
-  useComputeShader: 1
+  useComputeShader: 0
   computeShaderThreshold: 1000
   operationInterval: 0.016
   autoWeld: 0
@@ -768,51 +772,13 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &1994714070
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 1994714075}
-  - component: {fileID: 1994714074}
-  - component: {fileID: 1994714073}
-  - component: {fileID: 1994714071}
-  m_Layer: 0
-  m_Name: Sphere
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &1994714071
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1994714070}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: d2627436d012f05409644ddc4fda5897, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::GrindableObject
-  weldThreshold: 0.001
-  enforceOriginalBounds: 1
-  useBVHBounds: 1
-  showAffectedVertices: 0
-  showOriginalBounds: 0
-  showBVHBounds: 1
-  colorUpdater: {fileID: 0}
---- !u!23 &1994714073
+--- !u!23 &382377107997677447
 MeshRenderer:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1994714070}
+  m_GameObject: {fileID: 7064674431178529122}
   m_Enabled: 1
   m_CastShadows: 1
   m_ReceiveShadows: 1
@@ -831,7 +797,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: -3033667219593020291, guid: 6c9527f618bd3b74e9dbde0ceff65f44, type: 3}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -855,29 +821,67 @@ MeshRenderer:
   m_SortingOrder: 0
   m_MaskInteraction: 0
   m_AdditionalVertexStreams: {fileID: 0}
---- !u!33 &1994714074
-MeshFilter:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1994714070}
-  m_Mesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
---- !u!4 &1994714075
+--- !u!4 &2070790003481397849
 Transform:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1994714070}
+  m_GameObject: {fileID: 7064674431178529122}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!33 &3777328033062613779
+MeshFilter:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7064674431178529122}
+  m_Mesh: {fileID: -2432090755550338912, guid: 6c9527f618bd3b74e9dbde0ceff65f44, type: 3}
+--- !u!1 &7064674431178529122
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2070790003481397849}
+  - component: {fileID: 3777328033062613779}
+  - component: {fileID: 382377107997677447}
+  - component: {fileID: 7064674431178529123}
+  m_Layer: 0
+  m_Name: Femur Right
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &7064674431178529123
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7064674431178529122}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d2627436d012f05409644ddc4fda5897, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::GrindableObject
+  weldThreshold: 0.001
+  enforceOriginalBounds: 1
+  useBVHBounds: 1
+  showAffectedVertices: 0
+  showOriginalBounds: 0
+  showBVHBounds: 1
+  colorUpdater: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -885,7 +889,7 @@ SceneRoots:
   - {fileID: 330585546}
   - {fileID: 410087041}
   - {fileID: 832575519}
-  - {fileID: 1994714075}
   - {fileID: 1373999574}
-  - {fileID: 264452395}
   - {fileID: 595500351}
+  - {fileID: 264452395}
+  - {fileID: 2070790003481397849}

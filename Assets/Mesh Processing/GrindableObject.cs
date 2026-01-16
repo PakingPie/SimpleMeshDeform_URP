@@ -314,6 +314,7 @@ public class GrindableObject : MonoBehaviour
                 {
                     // Use ClampToMeshSurface for consistent behavior with grinding
                     projectedPos = ClampToMeshSurface(worldPos, projectedPos, drillDirection);
+                    Debug.Log($"Drill clamped vertex {i} to mesh surface at {projectedPos}");
                 }
             }
             else
