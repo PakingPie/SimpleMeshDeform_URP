@@ -1,0 +1,243 @@
+// SDFOperations.compute
+#pragma kernel CSGUnion
+#pragma kernel CSGSubtract
+#pragma kernel CSGIntersect
+#pragma kernel DeformPush
+#pragma kernel DeformSmooth
+
+// SDF volumes
+RWTexture3D<float> _SDFVolume;
+Texture3D<float> _SDFVolumeRead;
+Texture3D<float> _ToolSDF;
+SamplerState sampler_ToolSDF;
+
+// Parameters
+float3 _VolumeMin;
+float3 _VolumeMax;
+int3 _VolumeResolution;
+
+// Tool parameters
+float3 _ToolPosition;
+float3 _ToolRotation; // Euler angles in radians
+float3 _ToolScale;
+int _ToolType; // 0 = Sphere, 1 = Box, 2 = Cylinder
+float _ToolBlend; // Smooth blend factor
+
+// Deformation parameters
+float3 _BrushPosition;
+float3 _BrushDirection;
+float _BrushRadius;
+float _BrushStrength;
+float _BrushFalloff;
+
+float3 VoxelToWorld(int3 voxel)
+{
+    float3 t = (float3(voxel) + 0.5) / float3(_VolumeResolution);
+    return lerp(_VolumeMin, _VolumeMax, t);
+}
+
+float3 RotatePoint(float3 p, float3 euler)
+{
+    // Rotation matrices for each axis
+    float cx = cos(euler.x); float sx = sin(euler.x);
+    float cy = cos(euler.y); float sy = sin(euler.y);
+    float cz = cos(euler.z); float sz = sin(euler.z);
+    
+    // Combined rotation (ZYX order)
+    float3 result;
+    result.x = cy * cz * p.x + (sx * sy * cz - cx * sz) * p.y + (cx * sy * cz + sx * sz) * p.z;
+    result.y = cy * sz * p.x + (sx * sy * sz + cx * cz) * p.y + (cx * sy * sz - sx * cz) * p.z;
+    result.z = -sy * p.x + sx * cy * p.y + cx * cy * p.z;
+    
+    return result;
+}
+
+// Primitive SDF functions
+float SDFSphere(float3 p, float radius)
+{
+    return length(p) - radius;
+}
+
+float SDFBox(float3 p, float3 halfExtents)
+{
+    float3 d = abs(p) - halfExtents;
+    return length(max(d, 0.0)) + min(max(d.x, max(d.y, d.z)), 0.0);
+}
+
+float SDFCylinder(float3 p, float radius, float halfHeight)
+{
+    float2 d = abs(float2(length(p.xz), p.y)) - float2(radius, halfHeight);
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+}
+
+float GetToolSDF(float3 worldPos)
+{
+    // Transform point to tool local space
+    float3 localPos = worldPos - _ToolPosition;
+    localPos = RotatePoint(localPos, -_ToolRotation);
+    localPos /= _ToolScale;
+    
+    float sdf;
+    
+    if (_ToolType == 0) // Sphere
+    {
+        sdf = SDFSphere(localPos, 0.5);
+    }
+    else if (_ToolType == 1) // Box
+    {
+        sdf = SDFBox(localPos, float3(0.5, 0.5, 0.5));
+    }
+    else // Cylinder
+    {
+        sdf = SDFCylinder(localPos, 0.5, 0.5);
+    }
+    
+    // Scale the SDF value
+    return sdf * min(_ToolScale.x, min(_ToolScale.y, _ToolScale.z));
+}
+
+// Smooth min for blending (CSG union)
+float SmoothMin(float a, float b, float k)
+{
+    if (k <= 0.0)
+        return min(a, b);
+    
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
+// Smooth max for blending (CSG intersection)
+float SmoothMax(float a, float b, float k)
+{
+    return -SmoothMin(-a, -b, k);
+}
+
+[numthreads(8, 8, 8)]
+void CSGUnion(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_VolumeResolution.x ||
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
+    
+    float3 worldPos = VoxelToWorld(int3(id));
+    float currentSDF = _SDFVolume[id];
+    float toolSDF = GetToolSDF(worldPos);
+    
+    // Union: min of both SDFs
+    float result = SmoothMin(currentSDF, toolSDF, _ToolBlend);
+    _SDFVolume[id] = result;
+}
+
+[numthreads(8, 8, 8)]
+void CSGSubtract(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_VolumeResolution.x ||
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
+    
+    float3 worldPos = VoxelToWorld(int3(id));
+    float currentSDF = _SDFVolume[id];
+    float toolSDF = GetToolSDF(worldPos);
+    
+    // Subtraction: max(current, -tool)
+    float result = SmoothMax(currentSDF, -toolSDF, _ToolBlend);
+    _SDFVolume[id] = result;
+}
+
+[numthreads(8, 8, 8)]
+void CSGIntersect(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_VolumeResolution.x ||
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
+    
+    float3 worldPos = VoxelToWorld(int3(id));
+    float currentSDF = _SDFVolume[id];
+    float toolSDF = GetToolSDF(worldPos);
+    
+    // Intersection: max of both SDFs
+    float result = SmoothMax(currentSDF, toolSDF, _ToolBlend);
+    _SDFVolume[id] = result;
+}
+
+[numthreads(8, 8, 8)]
+void DeformPush(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_VolumeResolution.x ||
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
+    
+    float3 worldPos = VoxelToWorld(int3(id));
+    float currentSDF = _SDFVolume[id];
+    
+    // Calculate distance from brush center
+    float distToBrush = length(worldPos - _BrushPosition);
+    
+    if (distToBrush > _BrushRadius)
+        return;
+    
+    // Falloff function
+    float t = distToBrush / _BrushRadius;
+    float falloff = 1.0 - pow(t, _BrushFalloff);
+    falloff = saturate(falloff);
+    
+    // Push the surface
+    // Positive strength = push inward (add to SDF)
+    // Negative strength = push outward (subtract from SDF)
+    float delta = _BrushStrength * falloff;
+    
+    _SDFVolume[id] = currentSDF + delta;
+}
+
+[numthreads(8, 8, 8)]
+void DeformSmooth(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_VolumeResolution.x ||
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
+    
+    // Skip boundary voxels
+    if (id.x == 0 || id.y == 0 || id.z == 0 ||
+        id.x >= (uint)(_VolumeResolution.x - 1) ||
+        id.y >= (uint)(_VolumeResolution.y - 1) ||
+        id.z >= (uint)(_VolumeResolution.z - 1))
+        return;
+    
+    float3 worldPos = VoxelToWorld(int3(id));
+    float distToBrush = length(worldPos - _BrushPosition);
+    
+    if (distToBrush > _BrushRadius)
+        return;
+    
+    // Falloff
+    float t = distToBrush / _BrushRadius;
+    float falloff = 1.0 - pow(t, _BrushFalloff);
+    falloff = saturate(falloff);
+    
+    // 3x3x3 Gaussian-like blur
+    float sum = 0.0;
+    float weight = 0.0;
+    
+    for (int dz = -1; dz <= 1; dz++)
+    {
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                float w = 1.0 / (1.0 + abs(dx) + abs(dy) + abs(dz));
+                sum += _SDFVolumeRead[id + int3(dx, dy, dz)] * w;
+                weight += w;
+            }
+        }
+    }
+    
+    float smoothed = sum / weight;
+    float current = _SDFVolumeRead[id];
+    
+    _SDFVolume[id] = lerp(current, smoothed, falloff * _BrushStrength);
+}
