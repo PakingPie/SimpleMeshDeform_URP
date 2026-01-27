@@ -37,6 +37,19 @@ public class CuttingTool : MonoBehaviour
     private bool _isValid;
     private bool _isEnabled = true;
 
+    public Material PreviewMaterial
+    {
+        get => _previewMaterial;
+        set
+        {
+            _previewMaterial = value;
+            if (_previewRenderer != null)
+            {
+                _previewRenderer.material = _previewMaterial;
+            }
+        }
+    }
+
     public bool IsEnabled
     {
         get => _isEnabled;
@@ -184,7 +197,7 @@ public class CuttingTool : MonoBehaviour
         // Create preview material if not assigned
         if (_previewMaterial == null)
         {
-            _previewMaterial = new Material(Shader.Find("Standard"));
+            _previewMaterial = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
             _previewMaterial.SetFloat("_Mode", 3); // Transparent
             _previewMaterial.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
             _previewMaterial.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);

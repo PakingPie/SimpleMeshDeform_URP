@@ -13,6 +13,7 @@ public class MeshEditorSetup : MonoBehaviour
     [SerializeField] private ComputeShader _sdfGenerator;
     [SerializeField] private ComputeShader _sdfOperations;
     [SerializeField] private ComputeShader _marchingCubes;
+    [SerializeField] private Material _previewMaterial;
 
     [Header("Settings")]
     [SerializeField] private BrushSettings _brushSettings;
@@ -64,6 +65,7 @@ public class MeshEditorSetup : MonoBehaviour
         if (_enableCuttingTool)
         {
             _cuttingTool = gameObject.AddComponent<CuttingTool>();
+            _cuttingTool.PreviewMaterial = _previewMaterial;
             SetPrivateField(_cuttingTool, "_editController", _editController);
             
             if (_brushSettings != null)

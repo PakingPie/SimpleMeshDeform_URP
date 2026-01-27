@@ -1,7 +1,7 @@
 // SDFVolumeCache.cs
 using UnityEngine;
 using System.Collections.Generic;
-
+using UnityEngine.InputSystem;
 /// <summary>
 /// Caches SDF volumes for undo/redo and quick switching between states.
 /// </summary>
@@ -150,8 +150,8 @@ public class SDFUndoSystem : MonoBehaviour
 {
     [SerializeField] private MeshEditController _editController;
     [SerializeField] private int _maxUndoSteps = 20;
-    [SerializeField] private KeyCode _undoKey = KeyCode.Z;
-    [SerializeField] private KeyCode _redoKey = KeyCode.Y;
+    [SerializeField] private Key _undoKey = Key.Z;
+    [SerializeField] private Key _redoKey = Key.Y;
 
     private SDFVolumeCache _undoStack;
     private SDFVolumeCache _redoStack;
@@ -194,13 +194,13 @@ public class SDFUndoSystem : MonoBehaviour
     private void Update()
     {
         // Handle keyboard shortcuts
-        bool ctrl = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+        bool ctrl = Keyboard.current.leftCtrlKey.isPressed || Keyboard.current.rightCtrlKey.isPressed;
         
-        if (ctrl && Input.GetKeyDown(_undoKey))
+        if (ctrl && Keyboard.current[_undoKey].wasPressedThisFrame)
         {
             Undo();
         }
-        else if (ctrl && Input.GetKeyDown(_redoKey))
+        else if (ctrl && Keyboard.current[_redoKey].wasPressedThisFrame)
         {
             Redo();
         }
