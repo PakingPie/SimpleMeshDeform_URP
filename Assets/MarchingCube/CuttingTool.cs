@@ -1,5 +1,6 @@
 // CuttingTool.cs
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 /// <summary>
 /// Interactive cutting tool for mesh editing.
@@ -22,9 +23,8 @@ public class CuttingTool : MonoBehaviour
     [SerializeField] private Color _previewColor = new Color(1f, 0f, 0f, 0.5f);
     [SerializeField] private bool _showPreview = true;
 
-    [Header("Input")]
-    [SerializeField] private KeyCode _cutKey = KeyCode.Mouse0;
-    [SerializeField] private KeyCode _rotateKey = KeyCode.LeftShift;
+    // Input System
+    private Vector2 _mousePosition;
 
     // Preview object
     private GameObject _previewObject;
@@ -92,7 +92,8 @@ public class CuttingTool : MonoBehaviour
 
     private void UpdateToolPosition()
     {
-        Ray ray = _camera.ScreenPointToRay(Input.mousePosition);
+        _mousePosition = Mouse.current.position.ReadValue();
+        Ray ray = _camera.ScreenPointToRay(_mousePosition);
         
         if (Physics.Raycast(ray, out RaycastHit hit, 100f, _raycastLayers))
         {
@@ -100,7 +101,7 @@ public class CuttingTool : MonoBehaviour
             _isValid = true;
 
             // Align to surface normal (optional)
-            if (Input.GetKey(_rotateKey))
+            if (Keyboard.current.leftShiftKey.isPressed)
             {
                 Vector3 forward = Vector3.Cross(hit.normal, Vector3.up);
                 if (forward.sqrMagnitude < 0.001f)
@@ -141,13 +142,13 @@ public class CuttingTool : MonoBehaviour
 
     private void HandleInput()
     {
-        if (Input.GetKeyDown(_cutKey) && _isValid)
+        if (Mouse.current.leftButton.wasPressedThisFrame && _isValid)
         {
             PerformCut();
         }
 
         // Scroll to resize
-        float scroll = Input.mouseScrollDelta.y;
+        float scroll = Mouse.current.scroll.y.ReadValue();
         if (Mathf.Abs(scroll) > 0.01f)
         {
             float scaleFactor = 1f + scroll * 0.1f;
@@ -156,9 +157,9 @@ public class CuttingTool : MonoBehaviour
         }
 
         // Number keys for tool type
-        if (Input.GetKeyDown(KeyCode.Alpha1)) ToolType = SDFOperations.ToolType.Sphere;
-        if (Input.GetKeyDown(KeyCode.Alpha2)) ToolType = SDFOperations.ToolType.Box;
-        if (Input.GetKeyDown(KeyCode.Alpha3)) ToolType = SDFOperations.ToolType.Cylinder;
+        if (Keyboard.current.digit1Key.wasPressedThisFrame) ToolType = SDFOperations.ToolType.Sphere;
+        if (Keyboard.current.digit2Key.wasPressedThisFrame) ToolType = SDFOperations.ToolType.Box;
+        if (Keyboard.current.digit3Key.wasPressedThisFrame) ToolType = SDFOperations.ToolType.Cylinder;
     }
 
     private void PerformCut()

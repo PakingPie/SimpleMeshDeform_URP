@@ -1,6 +1,7 @@
 // DeformBrush.cs
 using UnityEngine;
 using System.Collections.Generic;
+using UnityEngine.InputSystem;
 
 /// <summary>
 /// Interactive deformation brush for push/pull/smooth operations.
@@ -29,9 +30,9 @@ public class DeformBrush : MonoBehaviour
     [SerializeField] private Color _pullColor = new Color(1f, 0.5f, 0f, 0.5f);
     [SerializeField] private Color _smoothColor = new Color(0f, 1f, 0.5f, 0.5f);
 
-    [Header("Input")]
-    [SerializeField] private KeyCode _brushKey = KeyCode.Mouse0;
-    [SerializeField] private KeyCode _invertKey = KeyCode.LeftControl;
+    // Input System
+    private Vector2 _mousePosition;
+    private float _mouseScroll;
 
     // Preview
     private GameObject _previewObject;
@@ -102,7 +103,8 @@ public class DeformBrush : MonoBehaviour
 
     private void UpdatePreviewPosition()
     {
-        Ray ray = _camera.ScreenPointToRay(Input.mousePosition);
+        _mousePosition = Mouse.current.position.ReadValue();
+        Ray ray = _camera.ScreenPointToRay(_mousePosition);
         
         if (Physics.Raycast(ray, out RaycastHit hit, 100f, _raycastLayers))
         {
@@ -127,36 +129,36 @@ public class DeformBrush : MonoBehaviour
 
     private void HandleInput()
     {
-        // Mode switching
-        if (Input.GetKeyDown(KeyCode.Alpha1)) _brushMode = SDFOperations.DeformationType.Push;
-        if (Input.GetKeyDown(KeyCode.Alpha2)) _brushMode = SDFOperations.DeformationType.Pull;
-        if (Input.GetKeyDown(KeyCode.Alpha3)) _brushMode = SDFOperations.DeformationType.Smooth;
+        // Mode switching with 1, 2, 3 keys
+        if (Keyboard.current.digit1Key.wasPressedThisFrame) _brushMode = SDFOperations.DeformationType.Push;
+        if (Keyboard.current.digit2Key.wasPressedThisFrame) _brushMode = SDFOperations.DeformationType.Pull;
+        if (Keyboard.current.digit3Key.wasPressedThisFrame) _brushMode = SDFOperations.DeformationType.Smooth;
 
-        // Brush size adjustment
-        float scroll = Input.mouseScrollDelta.y;
-        if (Mathf.Abs(scroll) > 0.01f)
+        // Brush size adjustment with mouse scroll
+        _mouseScroll = Mouse.current.scroll.y.ReadValue();
+        if (Mathf.Abs(_mouseScroll) > 0.01f)
         {
-            _brushRadius *= (1f + scroll * 0.1f);
+            _brushRadius *= (1f + _mouseScroll * 0.1f);
             _brushRadius = Mathf.Clamp(_brushRadius, 0.01f, 2f);
         }
 
         // Strength adjustment with shift + scroll
-        if (Input.GetKey(KeyCode.LeftShift) && Mathf.Abs(scroll) > 0.01f)
+        if (Keyboard.current.leftShiftKey.isPressed && Mathf.Abs(_mouseScroll) > 0.01f)
         {
-            _brushStrength *= (1f + scroll * 0.1f);
+            _brushStrength *= (1f + _mouseScroll * 0.1f);
             _brushStrength = Mathf.Clamp(_brushStrength, 0.001f, 0.1f);
         }
 
-        // Stroke handling
-        if (Input.GetKeyDown(_brushKey))
+        // Stroke handling with left mouse button
+        if (Mouse.current.leftButton.wasPressedThisFrame)
         {
             StartStroke();
         }
-        else if (Input.GetKey(_brushKey) && _isStroking)
+        else if (Mouse.current.leftButton.isPressed && _isStroking)
         {
             ContinueStroke();
         }
-        else if (Input.GetKeyUp(_brushKey) && _isStroking)
+        else if (Mouse.current.leftButton.wasReleasedThisFrame && _isStroking)
         {
             EndStroke();
         }
@@ -164,7 +166,8 @@ public class DeformBrush : MonoBehaviour
 
     private void StartStroke()
     {
-        Ray ray = _camera.ScreenPointToRay(Input.mousePosition);
+        _mousePosition = Mouse.current.position.ReadValue();
+        Ray ray = _camera.ScreenPointToRay(_mousePosition);
         
         if (Physics.Raycast(ray, out RaycastHit hit, 100f, _raycastLayers))
         {
@@ -182,7 +185,8 @@ public class DeformBrush : MonoBehaviour
 
     private void ContinueStroke()
     {
-        Ray ray = _camera.ScreenPointToRay(Input.mousePosition);
+        _mousePosition = Mouse.current.position.ReadValue();
+        Ray ray = _camera.ScreenPointToRay(_mousePosition);
         
         if (Physics.Raycast(ray, out RaycastHit hit, 100f, _raycastLayers))
         {
@@ -227,7 +231,7 @@ public class DeformBrush : MonoBehaviour
 
         // Invert mode with control key
         var mode = _brushMode;
-        if (Input.GetKey(_invertKey))
+        if (Keyboard.current.leftCtrlKey.isPressed)
         {
             mode = mode switch
             {
@@ -256,7 +260,7 @@ public class DeformBrush : MonoBehaviour
         };
 
         // Invert color when control is held
-        if (Input.GetKey(_invertKey) && _brushMode != SDFOperations.DeformationType.Smooth)
+        if (Keyboard.current.leftCtrlKey.isPressed && _brushMode != SDFOperations.DeformationType.Smooth)
         {
             color = _brushMode == SDFOperations.DeformationType.Push ? _pullColor : _pushColor;
         }

@@ -36,6 +36,11 @@ public class MeshEditController : MonoBehaviour
     private bool _isInitialized;
     private bool _isDirty;
 
+    // Add these fields at the class level (near other private fields)
+    private MeshBVH _meshBVH;
+    private LinearBVH _linearBVH;
+
+
     // Events
     public event Action<Mesh> OnMeshUpdated;
     public event Action OnOperationComplete;
@@ -93,13 +98,13 @@ public class MeshEditController : MonoBehaviour
 
         // Create SDF volume
         _sdfVolume = new SDFVolume(_sdfResolution, bounds, _sdfGeneratorShader, _sdfOperationsShader);
-        
+
         // Create marching cubes extractor
         _marchingCubes = new MarchingCubesGPU(_marchingCubesShader);
-        
+
         // Create operations handler
         _sdfOperations = new SDFOperations(_sdfOperationsShader);
-        
+
         // Create UV transfer
         _uvTransfer = new UVTransfer(_originalMesh);
 
@@ -107,7 +112,7 @@ public class MeshEditController : MonoBehaviour
         GenerateSDFFromMesh();
 
         _isInitialized = true;
-        
+
         // Apply to mesh filter
         if (_meshFilter != null)
         {
@@ -118,7 +123,7 @@ public class MeshEditController : MonoBehaviour
     /// <summary>
     /// Cut the mesh using a primitive shape.
     /// </summary>
-    public void Cut(SDFOperations.ToolType toolType, Vector3 position, 
+    public void Cut(SDFOperations.ToolType toolType, Vector3 position,
                    Vector3 rotation, Vector3 scale, float blendRadius = 0f)
     {
         if (!_isInitialized)
@@ -136,7 +141,7 @@ public class MeshEditController : MonoBehaviour
 
         _sdfOperations.ApplyCSG(_sdfVolume, SDFOperations.CSGOperation.Subtract,
                                 toolType, position, rotation, scale, blendRadius);
-        
+
         _isDirty = true;
         RegenerateMesh();
     }
@@ -153,22 +158,22 @@ public class MeshEditController : MonoBehaviour
         }
 
         // Create temporary SDF for cutting mesh
-        Bounds cutBounds = TransformBounds(cuttingMesh.bounds, 
+        Bounds cutBounds = TransformBounds(cuttingMesh.bounds,
             Matrix4x4.TRS(position, rotation, scale));
-        
-        SDFVolume cutVolume = new SDFVolume(_sdfResolution / 2, cutBounds, 
+
+        SDFVolume cutVolume = new SDFVolume(_sdfResolution / 2, cutBounds,
             _sdfGeneratorShader, _sdfOperationsShader);
-        
+
         // Generate SDF from cutting mesh
         // This requires BVH generation for the cutting mesh
         // For now, use primitive approximation
         Debug.LogWarning("Mesh cutting not fully implemented. Using bounding box.");
-        
+
         // Apply CSG
         _sdfOperations.ApplyCSGMesh(_sdfVolume, SDFOperations.CSGOperation.Subtract, cutVolume);
-        
+
         cutVolume.Dispose();
-        
+
         _isDirty = true;
         RegenerateMesh();
     }
@@ -194,7 +199,7 @@ public class MeshEditController : MonoBehaviour
 
         _sdfOperations.ApplyDeformation(_sdfVolume, type, position, direction,
                                          radius, strength, falloff);
-        
+
         _isDirty = true;
     }
 
@@ -214,18 +219,18 @@ public class MeshEditController : MonoBehaviour
         Vector3[] localPoints = new Vector3[worldPoints.Length];
         for (int i = 0; i < worldPoints.Length; i++)
         {
-            localPoints[i] = transform != null 
-                ? transform.InverseTransformPoint(worldPoints[i]) 
+            localPoints[i] = transform != null
+                ? transform.InverseTransformPoint(worldPoints[i])
                 : worldPoints[i];
         }
 
-        Vector3 localDir = transform != null 
-            ? transform.InverseTransformDirection(direction) 
+        Vector3 localDir = transform != null
+            ? transform.InverseTransformDirection(direction)
             : direction;
 
         _sdfOperations.ApplyStroke(_sdfVolume, type, localPoints, localDir,
                                    radius, strength, falloff);
-        
+
         _isDirty = true;
     }
 
@@ -275,7 +280,7 @@ public class MeshEditController : MonoBehaviour
         {
             DestroyImmediate(_currentMesh);
         }
-        
+
         _currentMesh = mesh;
         _currentMesh.name = _originalMesh.name + "_Edited";
 
@@ -315,20 +320,72 @@ public class MeshEditController : MonoBehaviour
         {
             CommitDeformation();
         }
-        
+
         Mesh finalMesh = Instantiate(_currentMesh);
         finalMesh.name = _originalMesh.name + "_Final";
         return finalMesh;
     }
 
+    /// <summary>
+    /// Generate SDF from the original mesh using BVH acceleration.
+    /// </summary>
     private void GenerateSDFFromMesh()
     {
-        // This would use your existing BVH implementation
-        // For now, initialize with a simple field
-        _sdfVolume.Initialize(1f);
-        
-        // TODO: Generate proper SDF from mesh using BVH
-        // _sdfVolume.GenerateFromMesh(bvhBuffer, triangleBuffer, nodeCount);
+        if (_originalMesh == null || _sdfVolume == null)
+        {
+            Debug.LogError("Cannot generate SDF: missing mesh or volume.");
+            return;
+        }
+
+        // Build BVH from mesh
+        _meshBVH = new MeshBVH();
+        _meshBVH.Build(_originalMesh, transform);
+
+        // Linearize BVH for GPU traversal
+        _linearBVH = new LinearBVH();
+        _linearBVH.BuildFromBVH(_meshBVH);
+
+        if (_linearBVH.NodeCount == 0)
+        {
+            Debug.LogWarning("BVH has no nodes. Mesh may be empty.");
+            _sdfVolume.Initialize(1f);
+            return;
+        }
+
+        // Create GPU buffers
+        ComputeBuffer bvhNodeBuffer = null;
+        ComputeBuffer triangleBuffer = null;
+
+        try
+        {
+            _linearBVH.CreateBuffers(out bvhNodeBuffer, out triangleBuffer);
+
+            if (bvhNodeBuffer == null || triangleBuffer == null)
+            {
+                Debug.LogError("Failed to create BVH compute buffers.");
+                _sdfVolume.Initialize(1f);
+                return;
+            }
+
+            // Initialize volume first (sets all values to positive/outside)
+            _sdfVolume.Initialize(1f);
+
+            // Generate SDF from mesh using BVH-accelerated distance queries
+            _sdfVolume.GenerateFromMesh(bvhNodeBuffer, triangleBuffer, _linearBVH.NodeCount);
+
+            // Optional: Finalize/smooth the SDF
+            _sdfVolume.Finalize();
+
+            Debug.Log($"SDF generated from mesh: {_linearBVH.NodeCount} BVH nodes, " +
+                      $"{_linearBVH.GPUTriangles.Length} triangles, " +
+                      $"resolution {_sdfVolume.Resolution}");
+        }
+        finally
+        {
+            // Clean up GPU buffers
+            bvhNodeBuffer?.Release();
+            triangleBuffer?.Release();
+        }
     }
 
     private Bounds TransformBounds(Bounds localBounds, Matrix4x4 matrix)
@@ -351,7 +408,7 @@ public class MeshEditController : MonoBehaviour
         {
             result.Encapsulate(corners[i]);
         }
-        
+
         return result;
     }
 
@@ -359,12 +416,16 @@ public class MeshEditController : MonoBehaviour
     {
         _sdfVolume?.Dispose();
         _marchingCubes?.Dispose();
-        
+
+        // Clear BVH references
+        _meshBVH = null;
+        _linearBVH = null;
+
         if (_currentMesh != null && _currentMesh != _originalMesh)
         {
             DestroyImmediate(_currentMesh);
         }
-        
+
         _isInitialized = false;
     }
 
