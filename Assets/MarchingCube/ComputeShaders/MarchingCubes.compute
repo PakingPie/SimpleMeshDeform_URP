@@ -3,13 +3,11 @@
 #pragma kernel GenerateVertices
 #pragma kernel BuildTriangles
 
+#include "./MarchTables.compute"
+
 // SDF volume texture
 Texture3D<float> _SDFVolume;
 SamplerState sampler_SDFVolume;
-
-// Lookup tables
-StructuredBuffer<int> _EdgeTable;
-StructuredBuffer<int> _TriangleTable;
 
 // Output buffers
 RWStructuredBuffer<float3> _Vertices;
@@ -23,23 +21,34 @@ float3 _VolumeMax;
 int3 _VolumeResolution;
 float _IsoLevel;
 
-// Corner offsets for a cube
+// Corner offsets for a cube (standard Marching Cubes convention)
+// Bottom face (Y=0): 0,1,2,3 | Top face (Y=1): 4,5,6,7
 static const int3 cornerOffsets[8] = {
-    int3(0, 0, 0),
-    int3(1, 0, 0),
-    int3(1, 0, 1),
-    int3(0, 0, 1),
-    int3(0, 1, 0),
-    int3(1, 1, 0),
-    int3(1, 1, 1),
-    int3(0, 1, 1)
+    int3(0, 0, 0),  // 0
+    int3(1, 0, 0),  // 1
+    int3(1, 1, 0),  // 2
+    int3(0, 1, 0),  // 3
+    int3(0, 0, 1),  // 4
+    int3(1, 0, 1),  // 5
+    int3(1, 1, 1),  // 6
+    int3(0, 1, 1)   // 7
 };
 
-// Edge to corner mapping
+// Edge to corner mapping (standard Marching Cubes convention)
+// Edges 0-3: bottom face, Edges 4-7: top face, Edges 8-11: vertical
 static const int2 edgeToCorners[12] = {
-    int2(0, 1), int2(1, 2), int2(2, 3), int2(3, 0),
-    int2(4, 5), int2(5, 6), int2(6, 7), int2(7, 4),
-    int2(0, 4), int2(1, 5), int2(2, 6), int2(3, 7)
+    int2(0, 1),  // Edge 0: bottom front
+    int2(1, 2),  // Edge 1: bottom right
+    int2(2, 3),  // Edge 2: bottom back
+    int2(3, 0),  // Edge 3: bottom left
+    int2(4, 5),  // Edge 4: top front
+    int2(5, 6),  // Edge 5: top right
+    int2(6, 7),  // Edge 6: top back
+    int2(7, 4),  // Edge 7: top left
+    int2(0, 4),  // Edge 8: vertical front-left
+    int2(1, 5),  // Edge 9: vertical front-right
+    int2(2, 6),  // Edge 10: vertical back-right
+    int2(3, 7)   // Edge 11: vertical back-left
 };
 
 float SampleSDF(int3 coord)
@@ -89,14 +98,11 @@ float3 CalculateNormalAtPoint(float3 worldPos)
     return -normalize(float3(dx, dy, dz));
 }
 
-[numthreads(8, 8, 8)]
+[numthreads(1, 1, 1)]
 void ClearCounters(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x == 0 && id.y == 0 && id.z == 0)
-    {
-        _Counter[0] = 0; // Vertex count
-        _Counter[1] = 0; // Triangle count
-    }
+    _Counter[0] = 0; // Vertex count
+    _Counter[1] = 0; // Triangle count
 }
 
 [numthreads(8, 8, 8)]
@@ -134,7 +140,7 @@ void GenerateVertices(uint3 id : SV_DispatchThreadID)
         return;
     
     // Get edge flags
-    int edgeFlags = _EdgeTable[cubeIndex];
+    int edgeFlags = edgeTable[cubeIndex];
     if (edgeFlags == 0)
         return;
     
@@ -159,12 +165,12 @@ void GenerateVertices(uint3 id : SV_DispatchThreadID)
     
     for (int t = 0; t < 15; t += 3)
     {
-        int e0 = _TriangleTable[tableOffset + t];
+        int e0 = triangleTable[tableOffset + t];
         if (e0 == -1)
             break;
         
-        int e1 = _TriangleTable[tableOffset + t + 1];
-        int e2 = _TriangleTable[tableOffset + t + 2];
+        int e1 = triangleTable[tableOffset + t + 1];
+        int e2 = triangleTable[tableOffset + t + 2];
         
         float3 v0 = edgeVertices[e0];
         float3 v1 = edgeVertices[e1];
@@ -201,6 +207,9 @@ void GenerateVertices(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void BuildTriangles(uint3 id : SV_DispatchThreadID)
 {
-    // This kernel is reserved for post-processing if needed
-    // (e.g., welding vertices, smoothing normals)
+    // NOTE: Triangle generation is already handled in GenerateVertices kernel.
+    // This kernel is reserved for optional post-processing if needed:
+    // - Vertex welding/deduplication
+    // - Normal smoothing
+    // - UV generation
 }

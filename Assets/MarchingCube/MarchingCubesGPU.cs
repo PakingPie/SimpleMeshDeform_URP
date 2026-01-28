@@ -11,8 +11,8 @@ using System.Collections.Generic;
 public class MarchingCubesGPU : IDisposable
 {
     private ComputeShader _marchingCubesShader;
-    private ComputeBuffer _edgeTableBuffer;
-    private ComputeBuffer _triangleTableBuffer;
+    // Note: edgeTable and triangleTable are static const arrays in the shader,
+    // so no ComputeBuffers needed for them.
     private ComputeBuffer _vertexBuffer;
     private ComputeBuffer _normalBuffer;
     private ComputeBuffer _triangleBuffer;
@@ -41,7 +41,6 @@ public class MarchingCubesGPU : IDisposable
 
         CacheKernels();
         CreateBuffers();
-        UploadTables();
     }
 
     private void CacheKernels()
@@ -61,12 +60,6 @@ public class MarchingCubesGPU : IDisposable
         _vertices = new Vector3[_maxVertices];
         _normals = new Vector3[_maxVertices];
         _triangles = new int[_maxTriangles];
-    }
-
-    private void UploadTables()
-    {
-        _edgeTableBuffer = MarchingCubesTables.CreateEdgeTableBuffer();
-        _triangleTableBuffer = MarchingCubesTables.CreateTriangleTableBuffer();
     }
 
     /// <summary>
@@ -212,8 +205,7 @@ public class MarchingCubesGPU : IDisposable
             sdfVolume.Resolution.x, sdfVolume.Resolution.y, sdfVolume.Resolution.z);
         _marchingCubesShader.SetFloat("_IsoLevel", isoLevel);
 
-        _marchingCubesShader.SetBuffer(_generateKernel, "_EdgeTable", _edgeTableBuffer);
-        _marchingCubesShader.SetBuffer(_generateKernel, "_TriangleTable", _triangleTableBuffer);
+        // Note: edgeTable and triangleTable are static const arrays in the shader
         _marchingCubesShader.SetBuffer(_generateKernel, "_Vertices", _vertexBuffer);
         _marchingCubesShader.SetBuffer(_generateKernel, "_Normals", _normalBuffer);
         _marchingCubesShader.SetBuffer(_generateKernel, "_Triangles", _triangleBuffer);
@@ -277,8 +269,6 @@ public class MarchingCubesGPU : IDisposable
     {
         if (_disposed) return;
 
-        _edgeTableBuffer?.Dispose();
-        _triangleTableBuffer?.Dispose();
         _vertexBuffer?.Dispose();
         _normalBuffer?.Dispose();
         _triangleBuffer?.Dispose();
