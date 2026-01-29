@@ -195,7 +195,11 @@ float QueryBVH(float3 vertex, out float3 closestPoint)
         {
             // Internal node - push children
             int leftIdx = node.leftOrTriangleOffset;
-            int rightIdx = leftIdx + 1;
+            int rightIdx = -node.triangleCount; // Right child index
+            if(rightIdx <= 0)
+            {
+                rightIdx = leftIdx + 1;
+            }
             
             // Push farther node first (so closer is processed first)
             float leftDist = DistanceToBounds(vertex, _BVHNodes[leftIdx].boundsMin, _BVHNodes[leftIdx].boundsMax);
@@ -236,6 +240,9 @@ float DetermineSign(float3 vertex, float3 closestPoint)
     directions[2] = float3(0, 0, 1);
     
     int insideVotes = 0;
+
+    if (_BVHNodeCount == 0)
+    return 1.0; // Outside if no geometry
     
     for (int d = 0; d < 3; d++)
     {
@@ -305,10 +312,15 @@ float DetermineSign(float3 vertex, float3 closestPoint)
             {
                 // Internal node - push children
                 int leftIdx = node.leftOrTriangleOffset;
+                int rightIdx = -node.triangleCount; // Right child index
+                if(rightIdx <= 0)
+                {
+                    rightIdx = leftIdx + 1;
+                }
                 if (stackPtr < MAX_STACK_DEPTH - 1)
                 {
                     stack[stackPtr++] = leftIdx;
-                    stack[stackPtr++] = leftIdx + 1;
+                    stack[stackPtr++] = rightIdx;
                 }
             }
         }

@@ -12,7 +12,7 @@ public class LinearBVH
         public Vector3 boundsMin;
         public int leftOrTriangleOffset; // If leaf: triangle start index, else: left child index
         public Vector3 boundsMax;
-        public int triangleCount; // 0 = internal node, >0 = leaf with this many triangles
+        public int triangleCount; // If leaf: triangle count (>0). If internal: negative right child index (-index)
     }
 
     // GPU-compatible triangle structure
@@ -99,14 +99,13 @@ public class LinearBVH
         else
         {
             // Internal node
-            linearNode.triangleCount = 0;
-
             // Left child is immediately after this node
             int leftIndex = LinearizeNode(bvh, node.left, ref nodeIndex, triangleList);
-            linearNode.leftOrTriangleOffset = leftIndex;
-
             // Right child follows left subtree
-            LinearizeNode(bvh, node.right, ref nodeIndex, triangleList);
+            int rightIndex = LinearizeNode(bvh, node.right, ref nodeIndex, triangleList);
+
+            linearNode.leftOrTriangleOffset = leftIndex;
+            linearNode.triangleCount = -rightIndex;
         }
 
         nodes[myIndex] = linearNode;
