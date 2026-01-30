@@ -9,6 +9,8 @@ public class MeshGenerator : MonoBehaviour
 {
     [Header("Input")]
     public MeshFilter SourceMeshFilter;
+    [Header("Output")]
+    public MeshFilter OutputMeshFilter;
 
     [Header("SDF Volume Settings")]
     public Vector3Int Resolution = new Vector3Int(64, 64, 64);
@@ -41,6 +43,8 @@ public class MeshGenerator : MonoBehaviour
     private MeshBVH _meshBVH;
     private LinearBVH _linearBVH;
 
+    private Mesh _originalSourceMesh;
+
     public void Run()
     {
         if (SourceMeshFilter == null || SourceMeshFilter.sharedMesh == null)
@@ -48,6 +52,9 @@ public class MeshGenerator : MonoBehaviour
             Debug.LogWarning("Missing SourceMeshFilter or mesh.");
             return;
         }
+
+        CacheOriginalSourceMesh();
+        EnsureOutputMeshFilter();
 
         if (MarchingCubesComputeShader == null || SDFGeneratorShader == null)
         {
@@ -92,25 +99,19 @@ public class MeshGenerator : MonoBehaviour
         Triangle[] tris = new Triangle[numTris];
         _triangleBuffer.GetData(tris, 0, 0, numTris);
 
-        Mesh mesh = SourceMeshFilter.sharedMesh;
-        if (mesh == null)
-        {
-            mesh = new Mesh();
-        }
-        else
-        {
-            mesh.Clear();
-        }
+        Mesh mesh = new Mesh();
 
         var vertices = new Vector3[numTris * 3];
         var meshTriangles = new int[numTris * 3];
+
+        Transform meshTransform = OutputMeshFilter != null ? OutputMeshFilter.transform : SourceMeshFilter.transform;
 
         for (int i = 0; i < numTris; i++)
         {
             for (int j = 0; j < 3; j++)
             {
                 meshTriangles[i * 3 + j] = i * 3 + j;
-                vertices[i * 3 + j] = tris[i][j];
+                vertices[i * 3 + j] = meshTransform.InverseTransformPoint(tris[i][j]);
             }
         }
 
@@ -119,8 +120,9 @@ public class MeshGenerator : MonoBehaviour
 
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
-        mesh.name = SourceMeshFilter.sharedMesh.name + "_SDF";
-        SourceMeshFilter.sharedMesh = mesh;
+        string sourceName = _originalSourceMesh != null ? _originalSourceMesh.name : SourceMeshFilter.sharedMesh.name;
+        mesh.name = sourceName + "_SDF";
+        OutputMeshFilter.sharedMesh = mesh;
     }
 
     public void PopulatePointBufferFromSDF()
@@ -266,7 +268,8 @@ public class MeshGenerator : MonoBehaviour
 
     private void BuildSDFVolume()
     {
-        Bounds bounds = SourceMeshFilter.sharedMesh.bounds;
+        Mesh sourceMesh = SourceMeshFilter.sharedMesh;
+        Bounds bounds = sourceMesh.bounds;
         bounds.Expand(Vector3.one * (Padding * 2f));
         WorldBounds = TransformBounds(bounds, SourceMeshFilter.transform.localToWorldMatrix);
 
@@ -278,7 +281,7 @@ public class MeshGenerator : MonoBehaviour
         DispatchCompute(SDFGeneratorShader, _initializeKernel);
 
         _meshBVH = new MeshBVH();
-        _meshBVH.Build(SourceMeshFilter.sharedMesh, SourceMeshFilter.transform);
+        _meshBVH.Build(sourceMesh, SourceMeshFilter.transform);
         _linearBVH = new LinearBVH();
         _linearBVH.BuildFromBVH(_meshBVH);
 
@@ -376,6 +379,37 @@ public class MeshGenerator : MonoBehaviour
         int max = Mathf.Max(Resolution.x, Mathf.Max(Resolution.y, Resolution.z));
         Debug.LogWarning($"MarchingCubes2.compute expects a cubic grid. Forcing resolution to {max}^3.");
         Resolution = new Vector3Int(max, max, max);
+    }
+
+    private void CacheOriginalSourceMesh()
+    {
+        if (_originalSourceMesh == null && SourceMeshFilter.sharedMesh != null)
+        {
+            _originalSourceMesh = SourceMeshFilter.sharedMesh;
+        }
+    }
+
+    private void EnsureOutputMeshFilter()
+    {
+        if (OutputMeshFilter != null && OutputMeshFilter != SourceMeshFilter)
+        {
+            return;
+        }
+
+        Transform parent = SourceMeshFilter.transform;
+        GameObject outputGO = new GameObject(SourceMeshFilter.gameObject.name + "_SDF_Output_Mesh");
+        outputGO.transform.SetParent(parent, false);
+        outputGO.transform.localPosition = Vector3.zero;
+        outputGO.transform.localRotation = Quaternion.identity;
+        outputGO.transform.localScale = Vector3.one;
+
+        OutputMeshFilter = outputGO.AddComponent<MeshFilter>();
+        var sourceRenderer = SourceMeshFilter.GetComponent<MeshRenderer>();
+        if (sourceRenderer != null)
+        {
+            var outputRenderer = outputGO.AddComponent<MeshRenderer>();
+            outputRenderer.sharedMaterials = sourceRenderer.sharedMaterials;
+        }
     }
 
     private void ReleaseSDFResources()

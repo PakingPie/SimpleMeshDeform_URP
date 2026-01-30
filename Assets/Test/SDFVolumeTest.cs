@@ -166,6 +166,19 @@ public class SDFVolumeTest : MonoBehaviour
             AssetDatabase.CreateAsset(_sdfTex, assetPath);
             AssetDatabase.SaveAssets();
             Debug.Log($"SDF Volume data saved to {assetPath}");
+
+            Texture3D texture3D = new Texture3D(Resolution.x, Resolution.y, Resolution.z, TextureFormat.RFloat, false);
+            RenderTexture.active = _sdfTex;
+            Texture2D tempTex2D = new Texture2D(Resolution.x, Resolution.y * Resolution.z, TextureFormat.RFloat, false);
+            tempTex2D.ReadPixels(new Rect(0, 0, Resolution.x, Resolution.y * Resolution.z), 0, 0);
+            tempTex2D.Apply();
+            Color[] colors = tempTex2D.GetPixels();
+            texture3D.SetPixels(colors);
+            texture3D.Apply();
+            string texture3DPath = $"Assets/Resources/SDFVolumeTexture3D.asset";
+            AssetDatabase.CreateAsset(texture3D, texture3DPath);
+            AssetDatabase.SaveAssets();
+            Debug.Log($"SDF Volume Texture3D saved to {texture3DPath}");
         }
         else
         {

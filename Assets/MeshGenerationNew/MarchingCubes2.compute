@@ -76,6 +76,4 @@ void March (int3 id : SV_DispatchThreadID)
         tri.vertexC = interpolateVerts(cubeCorners[a2], cubeCorners[b2]);
         triangles.Append(tri);
     }
-
-
 }
