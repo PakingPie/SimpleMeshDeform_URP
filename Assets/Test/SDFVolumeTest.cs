@@ -190,7 +190,8 @@ public class SDFVolumeTest : MonoBehaviour
 
         for(int z = 0; z < resZ; z++)
         {
-            Graphics.CopyTexture(_sdfTex, 0, z, sliceRT, 0, 0);
+            // For 3D textures, use volumeDepth parameter as the element index
+            Graphics.CopyTexture(_sdfTex, z, 0, sliceRT, 0, 0);
             var sliceRequest = AsyncGPUReadback.Request(sliceRT);
             sliceRequest.WaitForCompletion();
 
