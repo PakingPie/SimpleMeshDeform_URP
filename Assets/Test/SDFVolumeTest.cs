@@ -157,6 +157,68 @@ public class SDFVolumeTest : MonoBehaviour
         return result;
     }
 
+    private float[] ReadSDFValues(int resX, int resY, int resZ)
+    {
+        var request = AsyncGPUReadback.Request(_sdfTex);
+        request.WaitForCompletion();
+
+        if(request.hasError)
+        {
+            Debug.LogError("GPU readback error.");
+            return null;
+        }
+
+        var data = request.GetData<float>();
+        int expectedFull = resX * resY * resZ;
+        int expectedSlice = resX * resY;
+
+        if(data.Length == expectedFull)
+        {
+            float[] full = new float[expectedFull];
+            data.CopyTo(full);
+            return full;
+        }
+
+        if(data.Length != expectedSlice)
+        {
+            return null;
+        }
+
+        float [] values = new float[expectedFull];
+        RenderTexture sliceRT = RenderTexture.GetTemporary(resX, resY, 0, RenderTextureFormat.RFloat);
+        sliceRT.filterMode = FilterMode.Point;
+
+        for(int z = 0; z < resZ; z++)
+        {
+            Graphics.CopyTexture(_sdfTex, 0, z, sliceRT, 0, 0);
+            var sliceRequest = AsyncGPUReadback.Request(sliceRT);
+            sliceRequest.WaitForCompletion();
+
+            if(sliceRequest.hasError)
+            {
+                Debug.LogError("GPU readback error on slice.");
+                RenderTexture.ReleaseTemporary(sliceRT);
+                return null;
+            }
+
+            var sliceData = sliceRequest.GetData<float>();
+            if(sliceData.Length != expectedSlice)
+            {
+                RenderTexture.ReleaseTemporary(sliceRT);
+                return null;
+            }
+
+            int offset = z * expectedSlice;
+            for(int i = 0; i < expectedSlice; i++)
+            {
+                values[offset + i] = sliceData[i];
+            }
+        }
+
+        RenderTexture.ReleaseTemporary(sliceRT);
+        return values;
+    }
+
     public void SaveSDFVolumeDataAsset()
     {
 #if UNITY_EDITOR
@@ -167,12 +229,25 @@ public class SDFVolumeTest : MonoBehaviour
             AssetDatabase.SaveAssets();
             Debug.Log($"SDF Volume data saved to {assetPath}");
 
-            Texture3D texture3D = new Texture3D(Resolution.x, Resolution.y, Resolution.z, TextureFormat.RFloat, false);
-            RenderTexture.active = _sdfTex;
-            Texture2D tempTex2D = new Texture2D(Resolution.x, Resolution.y * Resolution.z, TextureFormat.RFloat, false);
-            tempTex2D.ReadPixels(new Rect(0, 0, Resolution.x, Resolution.y * Resolution.z), 0, 0);
-            tempTex2D.Apply();
-            Color[] colors = tempTex2D.GetPixels();
+            float[] sdfValues = ReadSDFValues(Resolution.x, Resolution.y, Resolution.z);
+            if (sdfValues == null)
+            {
+                Debug.LogError("Failed to read SDF values from GPU.");
+                return;
+            }
+
+            Texture3D texture3D = new Texture3D(Resolution.x, Resolution.y, Resolution.z, TextureFormat.RFloat, false)
+            {
+                filterMode = FilterMode.Trilinear,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            
+            Color[] colors = new Color[sdfValues.Length];
+            for(int i = 0; i < sdfValues.Length; i++)
+            {
+                colors[i] = new Color(sdfValues[i], 0, 0, 1f);
+            }
+            
             texture3D.SetPixels(colors);
             texture3D.Apply();
             string texture3DPath = $"Assets/Resources/SDFVolumeTexture3D.asset";
