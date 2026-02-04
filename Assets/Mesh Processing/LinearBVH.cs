@@ -6,16 +6,16 @@ using System.Collections.Generic;
 /// </summary>
 public class LinearBVH
 {
-    // GPU-compatible node structure (128 bytes aligned)
+    // GPU-compatible node structure
     public struct LinearBVHNode
     {
         public Vector3 boundsMin;
         public int leftOrTriangleOffset; // If leaf: triangle start index, else: left child index
         public Vector3 boundsMax;
-        public int triangleCount; // If leaf: triangle count (>0). If internal: negative right child index (-index)
+        public int rightChildOrCount;    // If leaf: triangle count (>0). If internal: right child index (stored as negative: -index)
     }
 
-    // GPU-compatible triangle structure
+    // GPU-compatible triangle structure (48 bytes)
     public struct GPUTriangle
     {
         public Vector3 v0;
@@ -76,6 +76,7 @@ public class LinearBVH
             }
         }
 
+        // Precompute triangle bounds
         Vector3[] triBoundsMin = new Vector3[triangleCount];
         Vector3[] triBoundsMax = new Vector3[triangleCount];
         for (int i = 0; i < triangleCount; i++)
@@ -88,23 +89,20 @@ public class LinearBVH
             Vector3 v1 = worldVertices[i1];
             Vector3 v2 = worldVertices[i2];
 
-            Vector3 min = Vector3.Min(v0, Vector3.Min(v1, v2));
-            Vector3 max = Vector3.Max(v0, Vector3.Max(v1, v2));
-
-            triBoundsMin[i] = min;
-            triBoundsMax[i] = max;
+            triBoundsMin[i] = Vector3.Min(v0, Vector3.Min(v1, v2));
+            triBoundsMax[i] = Vector3.Max(v0, Vector3.Max(v1, v2));
         }
 
-        nodeCount = CountNodesForRange(0, triangleCount, maxTrianglesPerLeaf);
+        // Count nodes first
+        nodeCount = CountNodesForRange(triangleCount, maxTrianglesPerLeaf);
         nodes = new LinearBVHNode[nodeCount];
 
         List<GPUTriangle> triangleList = new List<GPUTriangle>(triangleCount);
         int nodeIndex = 0;
-        BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, 0, triangleCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
+        BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, 
+                          0, triangleCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
 
         gpuTriangles = triangleList.ToArray();
-
-        Debug.Log($"LinearBVH built (sorted): {nodeCount} nodes, {gpuTriangles.Length} triangles");
     }
 
     /// <summary>
@@ -112,26 +110,23 @@ public class LinearBVH
     /// </summary>
     public void BuildFromBVH(MeshBVH bvh)
     {
-        if (bvh.Root == null)
+        if (bvh == null || bvh.Root == null)
         {
             nodes = new LinearBVHNode[0];
             gpuTriangles = new GPUTriangle[0];
+            nodeCount = 0;
             return;
         }
 
-        // Count nodes first
         nodeCount = CountNodes(bvh.Root);
         nodes = new LinearBVHNode[nodeCount];
 
-        // Collect all triangles referenced by leaves
         List<GPUTriangle> triangleList = new List<GPUTriangle>();
         int nodeIndex = 0;
 
         LinearizeNode(bvh, bvh.Root, ref nodeIndex, triangleList);
 
         gpuTriangles = triangleList.ToArray();
-
-        Debug.Log($"LinearBVH built: {nodeCount} nodes, {gpuTriangles.Length} triangles");
     }
 
     private int CountNodes(MeshBVH.BVHNode node)
@@ -145,16 +140,17 @@ public class LinearBVH
         int myIndex = nodeIndex;
         nodeIndex++;
 
-        LinearBVHNode linearNode = new LinearBVHNode();
-        linearNode.boundsMin = node.bounds.min;
-        linearNode.boundsMax = node.bounds.max;
+        LinearBVHNode linearNode = new LinearBVHNode
+        {
+            boundsMin = node.bounds.min,
+            boundsMax = node.bounds.max
+        };
 
         if (node.IsLeaf)
         {
             linearNode.leftOrTriangleOffset = triangleList.Count;
-            linearNode.triangleCount = node.triangleIndices.Length;
+            linearNode.rightChildOrCount = node.triangleIndices.Length; // Positive = leaf triangle count
 
-            // Add triangles
             foreach (int triIdx in node.triangleIndices)
             {
                 GPUTriangle gpuTri = new GPUTriangle();
@@ -171,28 +167,26 @@ public class LinearBVH
         }
         else
         {
-            // Internal node
-            // Left child is immediately after this node
+            // Internal node - left child immediately follows
             int leftIndex = LinearizeNode(bvh, node.left, ref nodeIndex, triangleList);
-            // Right child follows left subtree
             int rightIndex = LinearizeNode(bvh, node.right, ref nodeIndex, triangleList);
 
             linearNode.leftOrTriangleOffset = leftIndex;
-            linearNode.triangleCount = -rightIndex;
+            linearNode.rightChildOrCount = -rightIndex; // Negative = internal node, stores right child index
         }
 
         nodes[myIndex] = linearNode;
         return myIndex;
     }
 
-    private int CountNodesForRange(int start, int count, int maxTrianglesPerLeaf)
+    private int CountNodesForRange(int count, int maxTrianglesPerLeaf)
     {
         if (count <= maxTrianglesPerLeaf)
             return 1;
 
         int leftCount = count / 2;
         int rightCount = count - leftCount;
-        return 1 + CountNodesForRange(start, leftCount, maxTrianglesPerLeaf) + CountNodesForRange(start + leftCount, rightCount, maxTrianglesPerLeaf);
+        return 1 + CountNodesForRange(leftCount, maxTrianglesPerLeaf) + CountNodesForRange(rightCount, maxTrianglesPerLeaf);
     }
 
     private int BuildNodeFromRange(
@@ -210,6 +204,7 @@ public class LinearBVH
         int myIndex = nodeIndex;
         nodeIndex++;
 
+        // Calculate bounds for this range
         Vector3 boundsMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
         Vector3 boundsMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
 
@@ -228,8 +223,9 @@ public class LinearBVH
 
         if (count <= maxTrianglesPerLeaf)
         {
+            // Leaf node
             linearNode.leftOrTriangleOffset = triangleList.Count;
-            linearNode.triangleCount = count;
+            linearNode.rightChildOrCount = count; // Positive = triangle count
 
             for (int i = 0; i < count; i++)
             {
@@ -250,14 +246,19 @@ public class LinearBVH
         }
         else
         {
+            // Internal node
             int leftCount = count / 2;
             int rightCount = count - leftCount;
 
-            int leftIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, start, leftCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
-            int rightIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, start + leftCount, rightCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
+            int leftIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, 
+                                               worldVertices, meshTriangles, start, leftCount, 
+                                               maxTrianglesPerLeaf, ref nodeIndex, triangleList);
+            int rightIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, 
+                                                worldVertices, meshTriangles, start + leftCount, rightCount, 
+                                                maxTrianglesPerLeaf, ref nodeIndex, triangleList);
 
             linearNode.leftOrTriangleOffset = leftIndex;
-            linearNode.triangleCount = -rightIndex;
+            linearNode.rightChildOrCount = -rightIndex; // Negative = right child index
         }
 
         nodes[myIndex] = linearNode;
@@ -269,10 +270,11 @@ public class LinearBVH
     /// </summary>
     public void CreateBuffers(out ComputeBuffer nodeBuffer, out ComputeBuffer triangleBuffer)
     {
+        nodeBuffer = null;
+        triangleBuffer = null;
+
         if (nodes == null || nodes.Length == 0)
         {
-            nodeBuffer = null;
-            triangleBuffer = null;
             return;
         }
 
@@ -280,7 +282,7 @@ public class LinearBVH
         nodeBuffer = new ComputeBuffer(nodes.Length, 32);
         nodeBuffer.SetData(nodes);
 
-        // Triangle buffer: 3 * Vector4 (48 bytes) 
+        // Triangle buffer: 3 * (Vector3 + float) = 48 bytes
         if (gpuTriangles != null && gpuTriangles.Length > 0)
         {
             triangleBuffer = new ComputeBuffer(gpuTriangles.Length, 48);
@@ -288,8 +290,9 @@ public class LinearBVH
         }
         else
         {
-            // Create dummy buffer
+            // Create minimal dummy buffer to avoid null binding
             triangleBuffer = new ComputeBuffer(1, 48);
+            triangleBuffer.SetData(new GPUTriangle[1]);
         }
     }
 }

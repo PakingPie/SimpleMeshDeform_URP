@@ -12,7 +12,7 @@ struct LinearBVHNode
     float3 boundsMin;
     int leftOrTriangleOffset;
     float3 boundsMax;
-    int triangleCount;
+    int rightChildOrCount;  // Positive = leaf triangle count, Negative = -rightChildIndex
 };
 
 struct GPUTriangle
@@ -36,8 +36,8 @@ int _BVHNodeCount;
 float _InitialValue;
 float _NarrowBandWidth;
 
-// Stack for BVH traversal (max depth 32)
-#define MAX_STACK_DEPTH 32
+// Stack for BVH traversal
+#define MAX_STACK_DEPTH 64
 
 float3 VoxelToWorld(int3 voxel)
 {
@@ -45,7 +45,7 @@ float3 VoxelToWorld(int3 voxel)
     return lerp(_VolumeMin, _VolumeMax, t);
 }
 
-float PointToTriangleDistance(float3 p, float3 a, float3 b, float3 c)
+float PointToTriangleDistanceSq(float3 p, float3 a, float3 b, float3 c)
 {
     float3 ab = b - a;
     float3 ac = c - a;
@@ -54,46 +54,53 @@ float PointToTriangleDistance(float3 p, float3 a, float3 b, float3 c)
     float d1 = dot(ab, ap);
     float d2 = dot(ac, ap);
     if (d1 <= 0.0 && d2 <= 0.0)
-    return length(p - a);
+        return dot(ap, ap);
     
     float3 bp = p - b;
     float d3 = dot(ab, bp);
     float d4 = dot(ac, bp);
     if (d3 >= 0.0 && d4 <= d3)
-    return length(p - b);
+        return dot(bp, bp);
     
     float vc = d1 * d4 - d3 * d2;
     if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
     {
         float v = d1 / (d1 - d3);
-        return length(p - (a + v * ab));
+        float3 closest = a + v * ab;
+        float3 diff = p - closest;
+        return dot(diff, diff);
     }
     
     float3 cp = p - c;
     float d5 = dot(ab, cp);
     float d6 = dot(ac, cp);
     if (d6 >= 0.0 && d5 <= d6)
-    return length(p - c);
+        return dot(cp, cp);
     
     float vb = d5 * d2 - d1 * d6;
     if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
     {
         float w = d2 / (d2 - d6);
-        return length(p - (a + w * ac));
+        float3 closest = a + w * ac;
+        float3 diff = p - closest;
+        return dot(diff, diff);
     }
     
     float va = d3 * d6 - d5 * d4;
     if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0)
     {
         float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return length(p - (b + w * (c - b)));
+        float3 closest = b + w * (c - b);
+        float3 diff = p - closest;
+        return dot(diff, diff);
     }
     
     float denom = 1.0 / (va + vb + vc);
     float v2 = vb * denom;
     float w2 = vc * denom;
     float3 closest = a + ab * v2 + ac * w2;
-    return length(p - closest);
+    float3 diff = p - closest;
+    return dot(diff, diff);
 }
 
 float3 ClosestPointOnTriangle(float3 p, float3 a, float3 b, float3 c)
@@ -105,13 +112,13 @@ float3 ClosestPointOnTriangle(float3 p, float3 a, float3 b, float3 c)
     float d1 = dot(ab, ap);
     float d2 = dot(ac, ap);
     if (d1 <= 0.0 && d2 <= 0.0)
-    return a;
+        return a;
     
     float3 bp = p - b;
     float d3 = dot(ab, bp);
     float d4 = dot(ac, bp);
     if (d3 >= 0.0 && d4 <= d3)
-    return b;
+        return b;
     
     float vc = d1 * d4 - d3 * d2;
     if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
@@ -124,7 +131,7 @@ float3 ClosestPointOnTriangle(float3 p, float3 a, float3 b, float3 c)
     float d5 = dot(ab, cp);
     float d6 = dot(ac, cp);
     if (d6 >= 0.0 && d5 <= d6)
-    return c;
+        return c;
     
     float vb = d5 * d2 - d1 * d6;
     if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
@@ -146,47 +153,57 @@ float3 ClosestPointOnTriangle(float3 p, float3 a, float3 b, float3 c)
     return a + ab * v2 + ac * w2;
 }
 
-float DistanceToBounds(float3 p, float3 boundsMin, float3 boundsMax)
+float DistanceToBoundsSq(float3 p, float3 boundsMin, float3 boundsMax)
 {
     float3 closest = clamp(p, boundsMin, boundsMax);
-    return length(p - closest);
+    float3 diff = p - closest;
+    return dot(diff, diff);
 }
 
 float QueryBVH(float3 vertex, out float3 closestPoint)
 {
-    float minDist = 1e10;
+    float minDistSq = 1e20;
     closestPoint = vertex;
     
     if (_BVHNodeCount == 0)
-    return minDist;
+        return sqrt(minDistSq);
     
     // Stack-based BVH traversal
     int stack[MAX_STACK_DEPTH];
     int stackPtr = 0;
     stack[stackPtr++] = 0; // Root node
     
+    [loop]
     while (stackPtr > 0)
     {
         int nodeIdx = stack[--stackPtr];
+        
+        if (nodeIdx < 0 || nodeIdx >= _BVHNodeCount)
+            continue;
+            
         LinearBVHNode node = _BVHNodes[nodeIdx];
         
-        // Check bounds distance
-        float boundsDist = DistanceToBounds(vertex, node.boundsMin, node.boundsMax);
-        if (boundsDist >= minDist)
-        continue;
+        // Check bounds distance (squared for efficiency)
+        float boundsDistSq = DistanceToBoundsSq(vertex, node.boundsMin, node.boundsMax);
+        if (boundsDistSq >= minDistSq)
+            continue;
         
-        if (node.triangleCount > 0)
+        if (node.rightChildOrCount > 0)
         {
             // Leaf node - check triangles
-            for (int i = 0; i < node.triangleCount; i++)
+            int triCount = node.rightChildOrCount;
+            int triOffset = node.leftOrTriangleOffset;
+            
+            for (int i = 0; i < triCount; i++)
             {
-                GPUTriangle tri = _Triangles[node.leftOrTriangleOffset + i];
+                GPUTriangle tri = _Triangles[triOffset + i];
                 float3 cp = ClosestPointOnTriangle(vertex, tri.v0, tri.v1, tri.v2);
-                float dist = length(vertex - cp);
+                float3 diff = vertex - cp;
+                float distSq = dot(diff, diff);
                 
-                if (dist < minDist)
+                if (distSq < minDistSq)
                 {
-                    minDist = dist;
+                    minDistSq = distSq;
                     closestPoint = cp;
                 }
             }
@@ -195,55 +212,54 @@ float QueryBVH(float3 vertex, out float3 closestPoint)
         {
             // Internal node - push children
             int leftIdx = node.leftOrTriangleOffset;
-            int rightIdx = -node.triangleCount; // Right child index
-            if(rightIdx <= 0)
-            {
-                rightIdx = leftIdx + 1;
-            }
+            int rightIdx = -node.rightChildOrCount;
+            
+            // Validate indices
+            if (leftIdx < 0 || leftIdx >= _BVHNodeCount || rightIdx < 0 || rightIdx >= _BVHNodeCount)
+                continue;
             
             // Push farther node first (so closer is processed first)
-            float leftDist = DistanceToBounds(vertex, _BVHNodes[leftIdx].boundsMin, _BVHNodes[leftIdx].boundsMax);
-            float rightDist = DistanceToBounds(vertex, _BVHNodes[rightIdx].boundsMin, _BVHNodes[rightIdx].boundsMax);
+            float leftDistSq = DistanceToBoundsSq(vertex, _BVHNodes[leftIdx].boundsMin, _BVHNodes[leftIdx].boundsMax);
+            float rightDistSq = DistanceToBoundsSq(vertex, _BVHNodes[rightIdx].boundsMin, _BVHNodes[rightIdx].boundsMax);
             
-            if (stackPtr < MAX_STACK_DEPTH - 1)
+            if (stackPtr < MAX_STACK_DEPTH - 2)
             {
-                if (leftDist < rightDist)
+                if (leftDistSq < rightDistSq)
                 {
-                    if (rightDist < minDist)
-                    stack[stackPtr++] = rightIdx;
-                    if (leftDist < minDist)
-                    stack[stackPtr++] = leftIdx;
+                    if (rightDistSq < minDistSq)
+                        stack[stackPtr++] = rightIdx;
+                    if (leftDistSq < minDistSq)
+                        stack[stackPtr++] = leftIdx;
                 }
                 else
                 {
-                    if (leftDist < minDist)
-                    stack[stackPtr++] = leftIdx;
-                    if (rightDist < minDist)
-                    stack[stackPtr++] = rightIdx;
+                    if (leftDistSq < minDistSq)
+                        stack[stackPtr++] = leftIdx;
+                    if (rightDistSq < minDistSq)
+                        stack[stackPtr++] = rightIdx;
                 }
             }
         }
     }
     
-    return minDist;
+    return sqrt(minDistSq);
 }
 
-// Replace the DetermineSign function in SDFGenerator.compute with this:
+// Determine if vertex is inside or outside the mesh using ray casting
 float DetermineSign(float3 vertex, float3 closestPoint)
 {
-    // Cast rays in multiple directions and count intersections
-    // Odd number of intersections = inside, even = outside
+    if (_BVHNodeCount == 0)
+        return 1.0;
     
+    // Cast rays in 3 axis directions and vote
     float3 directions[3];
     directions[0] = float3(1, 0, 0);
     directions[1] = float3(0, 1, 0);
     directions[2] = float3(0, 0, 1);
     
     int insideVotes = 0;
-
-    if (_BVHNodeCount == 0)
-    return 1.0; // Outside if no geometry
     
+    [unroll]
     for (int d = 0; d < 3; d++)
     {
         float3 dir = directions[d];
@@ -254,13 +270,18 @@ float DetermineSign(float3 vertex, float3 closestPoint)
         int stackPtr = 0;
         stack[stackPtr++] = 0;
         
+        [loop]
         while (stackPtr > 0)
         {
             int nodeIdx = stack[--stackPtr];
+            
+            if (nodeIdx < 0 || nodeIdx >= _BVHNodeCount)
+                continue;
+                
             LinearBVHNode node = _BVHNodes[nodeIdx];
             
             // Ray-AABB intersection
-            float3 invDir = 1.0 / dir;
+            float3 invDir = 1.0 / (dir + float3(1e-10, 1e-10, 1e-10)); // Avoid division by zero
             float3 t0 = (node.boundsMin - vertex) * invDir;
             float3 t1 = (node.boundsMax - vertex) * invDir;
             float3 tmin3 = min(t0, t1);
@@ -269,14 +290,17 @@ float DetermineSign(float3 vertex, float3 closestPoint)
             float tmax = min(min(tmax3.x, tmax3.y), tmax3.z);
             
             if (tmax < 0 || tmin > tmax)
-            continue;
+                continue;
             
-            if (node.triangleCount > 0)
+            if (node.rightChildOrCount > 0)
             {
                 // Leaf node - test triangles
-                for (int i = 0; i < node.triangleCount; i++)
+                int triCount = node.rightChildOrCount;
+                int triOffset = node.leftOrTriangleOffset;
+                
+                for (int i = 0; i < triCount; i++)
                 {
-                    GPUTriangle tri = _Triangles[node.leftOrTriangleOffset + i];
+                    GPUTriangle tri = _Triangles[triOffset + i];
                     
                     // Möller–Trumbore ray-triangle intersection
                     float3 edge1 = tri.v1 - tri.v0;
@@ -285,24 +309,24 @@ float DetermineSign(float3 vertex, float3 closestPoint)
                     float a = dot(edge1, h);
                     
                     if (abs(a) < 1e-8)
-                    continue;
+                        continue;
                     
                     float f = 1.0 / a;
                     float3 s = vertex - tri.v0;
                     float u = f * dot(s, h);
                     
                     if (u < 0.0 || u > 1.0)
-                    continue;
+                        continue;
                     
                     float3 q = cross(s, edge1);
                     float v = f * dot(dir, q);
                     
                     if (v < 0.0 || u + v > 1.0)
-                    continue;
+                        continue;
                     
                     float t = f * dot(edge2, q);
                     
-                    if (t > 1e-6) // Ray intersection
+                    if (t > 1e-6)
                     {
                         intersectionCount++;
                     }
@@ -312,24 +336,24 @@ float DetermineSign(float3 vertex, float3 closestPoint)
             {
                 // Internal node - push children
                 int leftIdx = node.leftOrTriangleOffset;
-                int rightIdx = -node.triangleCount; // Right child index
-                if(rightIdx <= 0)
+                int rightIdx = -node.rightChildOrCount;
+                
+                if (leftIdx >= 0 && leftIdx < _BVHNodeCount && rightIdx >= 0 && rightIdx < _BVHNodeCount)
                 {
-                    rightIdx = leftIdx + 1;
-                }
-                if (stackPtr < MAX_STACK_DEPTH - 1)
-                {
-                    stack[stackPtr++] = leftIdx;
-                    stack[stackPtr++] = rightIdx;
+                    if (stackPtr < MAX_STACK_DEPTH - 2)
+                    {
+                        stack[stackPtr++] = leftIdx;
+                        stack[stackPtr++] = rightIdx;
+                    }
                 }
             }
         }
         
-        if (intersectionCount % 2 == 1)
-        insideVotes++;
+        if ((intersectionCount & 1) == 1) // Odd number = inside
+            insideVotes++;
     }
     
-    // Majority vote: 2 or more rays say inside = inside
+    // Majority vote
     return (insideVotes >= 2) ? -1.0 : 1.0;
 }
 
@@ -337,9 +361,9 @@ float DetermineSign(float3 vertex, float3 closestPoint)
 void InitializeSDF(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint)_VolumeResolution.x ||
-    id.y >= (uint)_VolumeResolution.y ||
-    id.z >= (uint)_VolumeResolution.z)
-    return;
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
     
     _SDFVolume[id] = _InitialValue;
 }
@@ -348,15 +372,15 @@ void InitializeSDF(uint3 id : SV_DispatchThreadID)
 void MeshToSDF(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint)_VolumeResolution.x ||
-    id.y >= (uint)_VolumeResolution.y ||
-    id.z >= (uint)_VolumeResolution.z)
-    return;
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
     
     float3 worldPos = VoxelToWorld(int3(id));
     float3 closestPoint;
     float distance = QueryBVH(worldPos, closestPoint);
     
-    // Apply narrow band optimization - only compute accurate SDF near surface
+    // Apply narrow band optimization
     if (distance > _NarrowBandWidth)
     {
         _SDFVolume[id] = _NarrowBandWidth;
@@ -364,7 +388,6 @@ void MeshToSDF(uint3 id : SV_DispatchThreadID)
     }
     
     // Determine sign (inside = negative, outside = positive)
-    // For closed meshes, we need proper inside/outside detection
     float sign = DetermineSign(worldPos, closestPoint);
     
     _SDFVolume[id] = distance * sign;
@@ -373,11 +396,10 @@ void MeshToSDF(uint3 id : SV_DispatchThreadID)
 [numthreads(8, 8, 8)]
 void FinalizeSDF(uint3 id : SV_DispatchThreadID)
 {
-    // Post-processing kernel for smoothing or fixing SDF issues
     if (id.x >= (uint)_VolumeResolution.x ||
-    id.y >= (uint)_VolumeResolution.y ||
-    id.z >= (uint)_VolumeResolution.z)
-    return;
+        id.y >= (uint)_VolumeResolution.y ||
+        id.z >= (uint)_VolumeResolution.z)
+        return;
     
-    // Currently a pass-through, can add Gaussian smoothing if needed
+    // Pass-through for now - can add smoothing later
 }

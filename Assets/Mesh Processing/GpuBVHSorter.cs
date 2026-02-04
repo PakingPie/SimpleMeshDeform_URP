@@ -1,8 +1,24 @@
 using UnityEngine;
+using UnityEngine.Rendering;
+using System;
 
 public class GpuBVHSorter
 {
     private const int ThreadGroupSize = 256;
+    
+    // Cached buffers to avoid allocation every frame
+    private ComputeBuffer _verticesBuffer;
+    private ComputeBuffer _trianglesBuffer;
+    private ComputeBuffer _codesBuffer;
+    private ComputeBuffer _indicesBuffer;
+    private int _lastTriangleCount;
+    private int _lastVertexCount;
+    private int _lastSortCount;
+    
+    // For async readback
+    private int[] _cachedSortResult;
+    private bool _sortResultReady;
+    private int _cachedTriangleCount;
 
     public bool TrySortTriangles(ComputeShader sortShader, Vector3[] worldVertices, int[] triangles, Bounds bounds, out int[] sortedTriangleIndices)
     {
@@ -17,6 +33,7 @@ public class GpuBVHSorter
 
         int sortCount = Mathf.NextPowerOfTwo(triangleCount);
 
+        // Prepare triangle indices
         Vector3Int[] triIndices = new Vector3Int[triangleCount];
         for (int i = 0; i < triangleCount; i++)
         {
@@ -27,30 +44,24 @@ public class GpuBVHSorter
             );
         }
 
-        ComputeBuffer verticesBuffer = null;
-        ComputeBuffer trianglesBuffer = null;
-        ComputeBuffer codesBuffer = null;
-        ComputeBuffer indicesBuffer = null;
-
         try
         {
-            verticesBuffer = new ComputeBuffer(worldVertices.Length, sizeof(float) * 3);
-            trianglesBuffer = new ComputeBuffer(triangleCount, sizeof(int) * 3);
-            codesBuffer = new ComputeBuffer(sortCount, sizeof(uint));
-            indicesBuffer = new ComputeBuffer(sortCount, sizeof(uint));
+            // Create or resize buffers as needed
+            EnsureBuffers(worldVertices.Length, triangleCount, sortCount);
 
-            verticesBuffer.SetData(worldVertices);
-            trianglesBuffer.SetData(triIndices);
+            _verticesBuffer.SetData(worldVertices);
+            _trianglesBuffer.SetData(triIndices);
 
+            // Initialize codes and indices
             uint[] codesInit = new uint[sortCount];
             uint[] indicesInit = new uint[sortCount];
-            for (int i = 0; i < sortCount; i++)
+            for (uint i = 0; i < sortCount; i++)
             {
                 codesInit[i] = uint.MaxValue;
-                indicesInit[i] = uint.MaxValue;
+                indicesInit[i] = (uint)(i < triangleCount ? i : uint.MaxValue);
             }
-            codesBuffer.SetData(codesInit);
-            indicesBuffer.SetData(indicesInit);
+            _codesBuffer.SetData(codesInit);
+            _indicesBuffer.SetData(indicesInit);
 
             int computeMortonKernel = sortShader.FindKernel("ComputeMorton");
             int bitonicSortKernel = sortShader.FindKernel("BitonicSort");
@@ -59,17 +70,17 @@ public class GpuBVHSorter
             sortShader.SetVector("_BoundsMin", bounds.min);
             sortShader.SetVector("_BoundsMax", bounds.max);
 
-            sortShader.SetBuffer(computeMortonKernel, "_Vertices", verticesBuffer);
-            sortShader.SetBuffer(computeMortonKernel, "_Triangles", trianglesBuffer);
-            sortShader.SetBuffer(computeMortonKernel, "_MortonCodes", codesBuffer);
-            sortShader.SetBuffer(computeMortonKernel, "_SortedTriangleIndices", indicesBuffer);
+            sortShader.SetBuffer(computeMortonKernel, "_Vertices", _verticesBuffer);
+            sortShader.SetBuffer(computeMortonKernel, "_Triangles", _trianglesBuffer);
+            sortShader.SetBuffer(computeMortonKernel, "_MortonCodes", _codesBuffer);
+            sortShader.SetBuffer(computeMortonKernel, "_SortedTriangleIndices", _indicesBuffer);
 
             int groupCount = Mathf.CeilToInt(triangleCount / (float)ThreadGroupSize);
             sortShader.Dispatch(computeMortonKernel, groupCount, 1, 1);
 
             sortShader.SetInt("_SortCount", sortCount);
-            sortShader.SetBuffer(bitonicSortKernel, "_MortonCodes", codesBuffer);
-            sortShader.SetBuffer(bitonicSortKernel, "_SortedTriangleIndices", indicesBuffer);
+            sortShader.SetBuffer(bitonicSortKernel, "_MortonCodes", _codesBuffer);
+            sortShader.SetBuffer(bitonicSortKernel, "_SortedTriangleIndices", _indicesBuffer);
 
             int sortGroupCount = Mathf.CeilToInt(sortCount / (float)ThreadGroupSize);
             for (int k = 2; k <= sortCount; k <<= 1)
@@ -82,23 +93,87 @@ public class GpuBVHSorter
                 }
             }
 
-            uint[] sorted = new uint[sortCount];
-            indicesBuffer.GetData(sorted);
+            // Use async readback with wait - this is safer than GetData
+            var request = AsyncGPUReadback.Request(_indicesBuffer);
+            request.WaitForCompletion();
 
+            if (request.hasError)
+            {
+                Debug.LogError("GPU readback error in BVH sorter");
+                return false;
+            }
+
+            var data = request.GetData<uint>();
             sortedTriangleIndices = new int[triangleCount];
             for (int i = 0; i < triangleCount; i++)
             {
-                sortedTriangleIndices[i] = (int)sorted[i];
+                uint idx = data[i];
+                // Validate index
+                if (idx < triangleCount)
+                {
+                    sortedTriangleIndices[i] = (int)idx;
+                }
+                else
+                {
+                    sortedTriangleIndices[i] = i; // Fallback to original order
+                }
             }
 
             return true;
         }
-        finally
+        catch (Exception e)
         {
-            if (verticesBuffer != null) verticesBuffer.Release();
-            if (trianglesBuffer != null) trianglesBuffer.Release();
-            if (codesBuffer != null) codesBuffer.Release();
-            if (indicesBuffer != null) indicesBuffer.Release();
+            Debug.LogError($"GPU BVH sort failed: {e.Message}");
+            return false;
         }
+        // Note: We don't release buffers here - they're reused
+    }
+
+    private void EnsureBuffers(int vertexCount, int triangleCount, int sortCount)
+    {
+        if (_verticesBuffer == null || _lastVertexCount < vertexCount)
+        {
+            _verticesBuffer?.Release();
+            _verticesBuffer = new ComputeBuffer(vertexCount, sizeof(float) * 3);
+            _lastVertexCount = vertexCount;
+        }
+
+        if (_trianglesBuffer == null || _lastTriangleCount < triangleCount)
+        {
+            _trianglesBuffer?.Release();
+            _trianglesBuffer = new ComputeBuffer(triangleCount, sizeof(int) * 3);
+            _lastTriangleCount = triangleCount;
+        }
+
+        if (_codesBuffer == null || _lastSortCount < sortCount)
+        {
+            _codesBuffer?.Release();
+            _indicesBuffer?.Release();
+            _codesBuffer = new ComputeBuffer(sortCount, sizeof(uint));
+            _indicesBuffer = new ComputeBuffer(sortCount, sizeof(uint));
+            _lastSortCount = sortCount;
+        }
+    }
+
+    public void Release()
+    {
+        _verticesBuffer?.Release();
+        _trianglesBuffer?.Release();
+        _codesBuffer?.Release();
+        _indicesBuffer?.Release();
+        
+        _verticesBuffer = null;
+        _trianglesBuffer = null;
+        _codesBuffer = null;
+        _indicesBuffer = null;
+        
+        _lastVertexCount = 0;
+        _lastTriangleCount = 0;
+        _lastSortCount = 0;
+    }
+
+    ~GpuBVHSorter()
+    {
+        Release();
     }
 }
