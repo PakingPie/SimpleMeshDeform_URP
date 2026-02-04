@@ -34,6 +34,7 @@ public class SDFVolumeTest : MonoBehaviour
 
     [Header("Debug")]
     public bool ShowDebugInfo = false;
+    public GameObject DebugObject;
 
     public float VoxelSize => (WorldBounds.size.x / Resolution.x +
                                WorldBounds.size.y / Resolution.y +
@@ -172,6 +173,9 @@ public class SDFVolumeTest : MonoBehaviour
             FinalizeSDFVolume();
             
             _nextUpdateTime = currentTime + MinUpdateInterval;
+            DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_DataTex", _sdfTex);
+            DebugObject.transform.localScale = WorldBounds.size;
+
         }
         finally
         {
