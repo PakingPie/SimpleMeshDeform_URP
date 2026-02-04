@@ -15,6 +15,7 @@ public class SDFVolumeTest : MonoBehaviour
     public GameObject SourceMeshObject;
     [Header("Compute Shaders")]
     public ComputeShader SDFGeneratorShader;
+    public ComputeShader BVHSortShader;
 
     public float VoxelSize => (WorldBounds.size.x / Resolution.x +
                             WorldBounds.size.y / Resolution.y +
@@ -29,6 +30,7 @@ public class SDFVolumeTest : MonoBehaviour
 
     private MeshBVH _meshBVH;
     private LinearBVH _linearBVH;
+    private readonly GpuBVHSorter _gpuBVHSorter = new GpuBVHSorter();
 
     public void Run()
     {
@@ -58,10 +60,35 @@ public class SDFVolumeTest : MonoBehaviour
 
     private void GenerateSDFVolume()
     {
-        _meshBVH = new MeshBVH();
-        _meshBVH.Build(SourceMeshObject.GetComponent<MeshFilter>().sharedMesh, transform);
+        Mesh sourceMesh = SourceMeshObject.GetComponent<MeshFilter>().sharedMesh;
+        Transform sourceTransform = SourceMeshObject.transform;
+
         _linearBVH = new LinearBVH();
-        _linearBVH.BuildFromBVH(_meshBVH);
+
+        int[] sortedTriangleIndices = null;
+        if (BVHSortShader != null)
+        {
+            Bounds meshBounds = TransformBounds(sourceMesh.bounds, sourceTransform.localToWorldMatrix);
+            Vector3[] localVertices = sourceMesh.vertices;
+            Vector3[] worldVertices = new Vector3[localVertices.Length];
+            for (int i = 0; i < localVertices.Length; i++)
+            {
+                worldVertices[i] = sourceTransform.TransformPoint(localVertices[i]);
+            }
+
+            _gpuBVHSorter.TrySortTriangles(BVHSortShader, worldVertices, sourceMesh.triangles, meshBounds, out sortedTriangleIndices);
+        }
+
+        if (sortedTriangleIndices != null && sortedTriangleIndices.Length > 0)
+        {
+            _linearBVH.BuildFromMesh(sourceMesh, sourceTransform, sortedTriangleIndices);
+        }
+        else
+        {
+            _meshBVH = new MeshBVH();
+            _meshBVH.Build(sourceMesh, sourceTransform);
+            _linearBVH.BuildFromBVH(_meshBVH);
+        }
 
         _bvhNodeBuffer = null;
         _triangleBuffer = null;

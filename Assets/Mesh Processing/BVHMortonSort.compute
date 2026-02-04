@@ -1,0 +1,81 @@
+// BVHMortonSort.compute
+#pragma kernel ComputeMorton
+#pragma kernel BitonicSort
+
+StructuredBuffer<float3> _Vertices;
+StructuredBuffer<int3> _Triangles;
+
+RWStructuredBuffer<uint> _MortonCodes;
+RWStructuredBuffer<uint> _SortedTriangleIndices;
+
+int _TriangleCount;
+float3 _BoundsMin;
+float3 _BoundsMax;
+
+int _SortK;
+int _SortJ;
+int _SortCount;
+
+uint ExpandBits(uint v)
+{
+    v = (v * 0x00010001u) & 0xFF0000FFu;
+    v = (v * 0x00000101u) & 0x0F00F00Fu;
+    v = (v * 0x00000011u) & 0xC30C30C3u;
+    v = (v * 0x00000005u) & 0x49249249u;
+    return v;
+}
+
+uint Morton3D(float3 p)
+{
+    float3 size = max(_BoundsMax - _BoundsMin, 1e-5);
+    float3 t = saturate((p - _BoundsMin) / size);
+    uint3 q = (uint3)floor(t * 1023.0 + 0.5);
+    return (ExpandBits(q.x) << 2) | (ExpandBits(q.y) << 1) | ExpandBits(q.z);
+}
+
+[numthreads(256, 1, 1)]
+void ComputeMorton(uint3 id : SV_DispatchThreadID)
+{
+    uint triIndex = id.x;
+    if (triIndex >= (uint)_TriangleCount)
+        return;
+
+    int3 tri = _Triangles[triIndex];
+    float3 v0 = _Vertices[tri.x];
+    float3 v1 = _Vertices[tri.y];
+    float3 v2 = _Vertices[tri.z];
+
+    float3 triCentroid = (v0 + v1 + v2) / 3.0;
+    uint code = Morton3D(triCentroid);
+
+    _MortonCodes[triIndex] = code;
+    _SortedTriangleIndices[triIndex] = triIndex;
+}
+
+[numthreads(256, 1, 1)]
+void BitonicSort(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= (uint)_SortCount)
+        return;
+
+    uint ixj = i ^ (uint)_SortJ;
+    if (ixj <= i || ixj >= (uint)_SortCount)
+        return;
+
+    bool ascending = ((i & (uint)_SortK) == 0);
+
+    uint codeA = _MortonCodes[i];
+    uint codeB = _MortonCodes[ixj];
+    uint indexA = _SortedTriangleIndices[i];
+    uint indexB = _SortedTriangleIndices[ixj];
+
+    bool swapNeeded = (codeA > codeB) == ascending;
+    if (swapNeeded)
+    {
+        _MortonCodes[i] = codeB;
+        _MortonCodes[ixj] = codeA;
+        _SortedTriangleIndices[i] = indexB;
+        _SortedTriangleIndices[ixj] = indexA;
+    }
+}

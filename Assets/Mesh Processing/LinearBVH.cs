@@ -35,6 +35,79 @@ public class LinearBVH
     public int NodeCount => nodeCount;
 
     /// <summary>
+    /// Builds a linearized BVH directly from a mesh using an optional sorted triangle index order.
+    /// </summary>
+    public void BuildFromMesh(Mesh mesh, Transform transform, int[] sortedTriangleIndices = null, int maxTrianglesPerLeaf = 4)
+    {
+        if (mesh == null)
+        {
+            nodes = new LinearBVHNode[0];
+            gpuTriangles = new GPUTriangle[0];
+            nodeCount = 0;
+            return;
+        }
+
+        maxTrianglesPerLeaf = Mathf.Max(1, maxTrianglesPerLeaf);
+
+        Vector3[] localVertices = mesh.vertices;
+        int[] meshTriangles = mesh.triangles;
+        int triangleCount = meshTriangles.Length / 3;
+
+        if (triangleCount == 0)
+        {
+            nodes = new LinearBVHNode[0];
+            gpuTriangles = new GPUTriangle[0];
+            nodeCount = 0;
+            return;
+        }
+
+        Vector3[] worldVertices = new Vector3[localVertices.Length];
+        for (int i = 0; i < localVertices.Length; i++)
+        {
+            worldVertices[i] = transform.TransformPoint(localVertices[i]);
+        }
+
+        if (sortedTriangleIndices == null || sortedTriangleIndices.Length != triangleCount)
+        {
+            sortedTriangleIndices = new int[triangleCount];
+            for (int i = 0; i < triangleCount; i++)
+            {
+                sortedTriangleIndices[i] = i;
+            }
+        }
+
+        Vector3[] triBoundsMin = new Vector3[triangleCount];
+        Vector3[] triBoundsMax = new Vector3[triangleCount];
+        for (int i = 0; i < triangleCount; i++)
+        {
+            int i0 = meshTriangles[i * 3];
+            int i1 = meshTriangles[i * 3 + 1];
+            int i2 = meshTriangles[i * 3 + 2];
+
+            Vector3 v0 = worldVertices[i0];
+            Vector3 v1 = worldVertices[i1];
+            Vector3 v2 = worldVertices[i2];
+
+            Vector3 min = Vector3.Min(v0, Vector3.Min(v1, v2));
+            Vector3 max = Vector3.Max(v0, Vector3.Max(v1, v2));
+
+            triBoundsMin[i] = min;
+            triBoundsMax[i] = max;
+        }
+
+        nodeCount = CountNodesForRange(0, triangleCount, maxTrianglesPerLeaf);
+        nodes = new LinearBVHNode[nodeCount];
+
+        List<GPUTriangle> triangleList = new List<GPUTriangle>(triangleCount);
+        int nodeIndex = 0;
+        BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, 0, triangleCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
+
+        gpuTriangles = triangleList.ToArray();
+
+        Debug.Log($"LinearBVH built (sorted): {nodeCount} nodes, {gpuTriangles.Length} triangles");
+    }
+
+    /// <summary>
     /// Builds a linearized BVH from a MeshBVH for GPU use.
     /// </summary>
     public void BuildFromBVH(MeshBVH bvh)
@@ -103,6 +176,85 @@ public class LinearBVH
             int leftIndex = LinearizeNode(bvh, node.left, ref nodeIndex, triangleList);
             // Right child follows left subtree
             int rightIndex = LinearizeNode(bvh, node.right, ref nodeIndex, triangleList);
+
+            linearNode.leftOrTriangleOffset = leftIndex;
+            linearNode.triangleCount = -rightIndex;
+        }
+
+        nodes[myIndex] = linearNode;
+        return myIndex;
+    }
+
+    private int CountNodesForRange(int start, int count, int maxTrianglesPerLeaf)
+    {
+        if (count <= maxTrianglesPerLeaf)
+            return 1;
+
+        int leftCount = count / 2;
+        int rightCount = count - leftCount;
+        return 1 + CountNodesForRange(start, leftCount, maxTrianglesPerLeaf) + CountNodesForRange(start + leftCount, rightCount, maxTrianglesPerLeaf);
+    }
+
+    private int BuildNodeFromRange(
+        int[] sortedTriangleIndices,
+        Vector3[] triBoundsMin,
+        Vector3[] triBoundsMax,
+        Vector3[] worldVertices,
+        int[] meshTriangles,
+        int start,
+        int count,
+        int maxTrianglesPerLeaf,
+        ref int nodeIndex,
+        List<GPUTriangle> triangleList)
+    {
+        int myIndex = nodeIndex;
+        nodeIndex++;
+
+        Vector3 boundsMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+        Vector3 boundsMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+        for (int i = 0; i < count; i++)
+        {
+            int triIdx = sortedTriangleIndices[start + i];
+            boundsMin = Vector3.Min(boundsMin, triBoundsMin[triIdx]);
+            boundsMax = Vector3.Max(boundsMax, triBoundsMax[triIdx]);
+        }
+
+        LinearBVHNode linearNode = new LinearBVHNode
+        {
+            boundsMin = boundsMin,
+            boundsMax = boundsMax
+        };
+
+        if (count <= maxTrianglesPerLeaf)
+        {
+            linearNode.leftOrTriangleOffset = triangleList.Count;
+            linearNode.triangleCount = count;
+
+            for (int i = 0; i < count; i++)
+            {
+                int triIdx = sortedTriangleIndices[start + i];
+                int i0 = meshTriangles[triIdx * 3];
+                int i1 = meshTriangles[triIdx * 3 + 1];
+                int i2 = meshTriangles[triIdx * 3 + 2];
+
+                GPUTriangle gpuTri = new GPUTriangle
+                {
+                    v0 = worldVertices[i0],
+                    v1 = worldVertices[i1],
+                    v2 = worldVertices[i2]
+                };
+
+                triangleList.Add(gpuTri);
+            }
+        }
+        else
+        {
+            int leftCount = count / 2;
+            int rightCount = count - leftCount;
+
+            int leftIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, start, leftCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
+            int rightIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, start + leftCount, rightCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
 
             linearNode.leftOrTriangleOffset = leftIndex;
             linearNode.triangleCount = -rightIndex;

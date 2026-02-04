@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.Rendering;
+using System.Collections.Generic;
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -23,6 +24,7 @@ public class MeshGenerator : MonoBehaviour
     [Header("Compute Shader Settings")]
     public ComputeShader MarchingCubesComputeShader;
     public ComputeShader SDFGeneratorShader;
+    public ComputeShader BVHSortShader;
 
     [Header("Voxel Settings")]
     public float IsoLevel = 0f;
@@ -42,8 +44,14 @@ public class MeshGenerator : MonoBehaviour
 
     private MeshBVH _meshBVH;
     private LinearBVH _linearBVH;
+    private readonly GpuBVHSorter _gpuBVHSorter = new GpuBVHSorter();
 
     private Mesh _originalSourceMesh;
+    private List<Triangle> _allTriangles = new List<Triangle>();
+    
+    // Region-based processing parameters
+    private int _regionSize = 0;
+    private bool _useRegionProcessing = false;
 
     public void Run()
     {
@@ -64,10 +72,33 @@ public class MeshGenerator : MonoBehaviour
 
         EnsureCubicResolution();
         CacheKernels();
-        CreateBuffers();
+        
+        // Determine if region-based processing is needed
+        int numVoxelsPerAxis = Resolution.x - 1;
+        int numVoxels = numVoxelsPerAxis * numVoxelsPerAxis * numVoxelsPerAxis;
+        long bufferSizeBytes = (long)numVoxels * 5 * 36;
+        const long maxBufferSize = 2147483648;
+        
+        if (bufferSizeBytes > maxBufferSize)
+        {
+            _regionSize = Mathf.FloorToInt(Mathf.Pow(maxBufferSize / 36 / 5, 1f / 3f)) + 1;
+            _useRegionProcessing = true;
+            Debug.Log($"Resolution {Resolution.x}^3 requires region-based processing. Using region size: {_regionSize}^3");
+        }
+        
         BuildSDFVolume();
-        PopulatePointBufferFromSDF();
-        GenerateMesh();
+        
+        if (_useRegionProcessing)
+        {
+            _allTriangles.Clear();
+            GenerateMeshWithRegions();
+        }
+        else
+        {
+            CreateBuffers();
+            PopulatePointBufferFromSDF();
+            GenerateMesh();
+        }
 
         if (!Application.isPlaying)
         {
@@ -123,6 +154,162 @@ public class MeshGenerator : MonoBehaviour
         string sourceName = _originalSourceMesh != null ? _originalSourceMesh.name : SourceMeshFilter.sharedMesh.name;
         mesh.name = sourceName + "_SDF";
         OutputMeshFilter.sharedMesh = mesh;
+    }
+
+    private void GenerateMeshWithRegions()
+    {
+        Transform meshTransform = OutputMeshFilter != null ? OutputMeshFilter.transform : SourceMeshFilter.transform;
+        int regionsPerAxis = Mathf.CeilToInt(Resolution.x / (float)_regionSize);
+        int totalRegions = regionsPerAxis * regionsPerAxis * regionsPerAxis;
+
+        Debug.Log($"Processing {totalRegions} regions ({regionsPerAxis}x{regionsPerAxis}x{regionsPerAxis})...");
+
+        for (int rz = 0; rz < regionsPerAxis; rz++)
+        {
+            for (int ry = 0; ry < regionsPerAxis; ry++)
+            {
+                for (int rx = 0; rx < regionsPerAxis; rx++)
+                {
+                    int regionIndex = rx + ry * regionsPerAxis + rz * regionsPerAxis * regionsPerAxis;
+                    Debug.Log($"Processing region {regionIndex + 1}/{totalRegions}");
+
+                    ProcessRegion(rx, ry, rz, meshTransform);
+                }
+            }
+        }
+
+        // Build final mesh from all collected triangles
+        BuildMeshFromTriangles(meshTransform);
+    }
+
+    private void ProcessRegion(int regionX, int regionY, int regionZ, Transform meshTransform)
+    {
+        // Calculate region bounds in grid coordinates
+        int startX = regionX * _regionSize;
+        int startY = regionY * _regionSize;
+        int startZ = regionZ * _regionSize;
+
+        int endX = Mathf.Min(startX + _regionSize, Resolution.x);
+        int endY = Mathf.Min(startY + _regionSize, Resolution.y);
+        int endZ = Mathf.Min(startZ + _regionSize, Resolution.z);
+
+        int regionResX = endX - startX;
+        int regionResY = endY - startY;
+        int regionResZ = endZ - startZ;
+
+        int regionNumPoints = regionResX * regionResY * regionResZ;
+
+        // Create temporary buffers for this region
+        ComputeBuffer regionPointBuffer = new ComputeBuffer(regionNumPoints, sizeof(float) * 4);
+        int regionMaxTriangles = (regionResX - 1) * (regionResY - 1) * (regionResZ - 1) * 5;
+        ComputeBuffer regionTriangleBuffer = new ComputeBuffer(regionMaxTriangles, sizeof(float) * 3 * 3, ComputeBufferType.Append);
+        ComputeBuffer regionTriCountBuffer = new ComputeBuffer(1, sizeof(int), ComputeBufferType.Raw);
+
+        try
+        {
+            // Populate point buffer for this region from SDF
+            Vector4[] regionPoints = new Vector4[regionNumPoints];
+            float[] sdfValues = ReadSDFValues(Resolution.x, Resolution.y, Resolution.z);
+
+            if (sdfValues != null)
+            {
+                int index = 0;
+                for (int z = startZ; z < endZ; z++)
+                {
+                    for (int y = startY; y < endY; y++)
+                    {
+                        for (int x = startX; x < endX; x++)
+                        {
+                            int sdfIndex = x + y * Resolution.x + z * Resolution.x * Resolution.y;
+                            float sdfValue = sdfValues[sdfIndex];
+
+                            Vector3 t = new Vector3(
+                                Resolution.x > 1 ? (float)x / (Resolution.x - 1) : 0f,
+                                Resolution.y > 1 ? (float)y / (Resolution.y - 1) : 0f,
+                                Resolution.z > 1 ? (float)z / (Resolution.z - 1) : 0f
+                            );
+                            Vector3 worldPos = WorldBounds.min + Vector3.Scale(t, WorldBounds.size);
+                            regionPoints[index] = new Vector4(worldPos.x, worldPos.y, worldPos.z, sdfValue);
+                            index++;
+                        }
+                    }
+                }
+
+                regionPointBuffer.SetData(regionPoints);
+
+                // Run Marching Cubes on this region
+                regionTriangleBuffer.SetCounterValue(0);
+
+                MarchingCubesComputeShader.SetBuffer(_marchKernel, "points", regionPointBuffer);
+                MarchingCubesComputeShader.SetBuffer(_marchKernel, "triangles", regionTriangleBuffer);
+                MarchingCubesComputeShader.SetInt("numPointsPerAxis", regionResX);
+                MarchingCubesComputeShader.SetFloat("isoLevel", IsoLevel);
+
+                int numVoxelsPerAxis = regionResX - 1;
+                int numThreadsPerAxis = Mathf.CeilToInt(numVoxelsPerAxis / (float)_threadGroupSize);
+                MarchingCubesComputeShader.Dispatch(_marchKernel, numThreadsPerAxis, numThreadsPerAxis, numThreadsPerAxis);
+
+                // Read triangle count and data
+                ComputeBuffer.CopyCount(regionTriangleBuffer, regionTriCountBuffer, 0);
+                int[] triCountArray = { 0 };
+                regionTriCountBuffer.GetData(triCountArray);
+                int numTris = triCountArray[0];
+
+                if (numTris > 0)
+                {
+                    Triangle[] tris = new Triangle[numTris];
+                    regionTriangleBuffer.GetData(tris, 0, 0, numTris);
+
+                    // Add to global triangle list
+                    for (int i = 0; i < numTris; i++)
+                    {
+                        _allTriangles.Add(tris[i]);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            // Clean up region buffers
+            regionPointBuffer?.Release();
+            regionTriangleBuffer?.Release();
+            regionTriCountBuffer?.Release();
+        }
+    }
+
+    private void BuildMeshFromTriangles(Transform meshTransform)
+    {
+        int numTris = _allTriangles.Count;
+        if (numTris == 0)
+        {
+            Debug.LogWarning("No triangles generated from Marching Cubes.");
+            return;
+        }
+
+        Mesh mesh = new Mesh();
+
+        var vertices = new Vector3[numTris * 3];
+        var meshTriangles = new int[numTris * 3];
+
+        for (int i = 0; i < numTris; i++)
+        {
+            for (int j = 0; j < 3; j++)
+            {
+                meshTriangles[i * 3 + j] = i * 3 + j;
+                vertices[i * 3 + j] = meshTransform.InverseTransformPoint(_allTriangles[i][j]);
+            }
+        }
+
+        mesh.vertices = vertices;
+        mesh.triangles = meshTriangles;
+
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        string sourceName = _originalSourceMesh != null ? _originalSourceMesh.name : SourceMeshFilter.sharedMesh.name;
+        mesh.name = sourceName + "_SDF";
+        OutputMeshFilter.sharedMesh = mesh;
+
+        Debug.Log($"Generated mesh with {numTris} triangles");
     }
 
     public void PopulatePointBufferFromSDF()
@@ -233,6 +420,17 @@ public class MeshGenerator : MonoBehaviour
         int numVoxels = numVoxelsPerAxis * numVoxelsPerAxis * numVoxelsPerAxis;
         int maxTriangleCount = numVoxels * 5;
 
+        // Check if buffer size would exceed max compute buffer size (2.1 GB)
+        long bufferSizeBytes = (long)maxTriangleCount * 36; // 36 bytes per triangle (3 verts * 3 floats * 4 bytes)
+        const long maxBufferSize = 2147483648; // 2.1 GB
+        
+        if (bufferSizeBytes > maxBufferSize)
+        {
+            Debug.LogError($"Computed buffer size ({bufferSizeBytes} bytes) exceeds maximum allowed size ({maxBufferSize} bytes). " +
+                $"Please reduce the Resolution. Current resolution: {Resolution.x}^3. Try using a smaller value.");
+            return;
+        }
+
         // Always create buffers in editor (since buffers are released immediately to prevent memory leak)
         // Otherwise, only create if null or if size has changed
         if (!Application.isPlaying || (_pointBuffer == null || numPoints != _pointBuffer.count))
@@ -280,10 +478,31 @@ public class MeshGenerator : MonoBehaviour
         SDFGeneratorShader.SetTexture(_initializeKernel, "_SDFVolume", _sdfTex);
         DispatchCompute(SDFGeneratorShader, _initializeKernel);
 
-        _meshBVH = new MeshBVH();
-        _meshBVH.Build(sourceMesh, SourceMeshFilter.transform);
         _linearBVH = new LinearBVH();
-        _linearBVH.BuildFromBVH(_meshBVH);
+
+        int[] sortedTriangleIndices = null;
+        if (BVHSortShader != null)
+        {
+            Vector3[] localVertices = sourceMesh.vertices;
+            Vector3[] worldVertices = new Vector3[localVertices.Length];
+            for (int i = 0; i < localVertices.Length; i++)
+            {
+                worldVertices[i] = SourceMeshFilter.transform.TransformPoint(localVertices[i]);
+            }
+
+            _gpuBVHSorter.TrySortTriangles(BVHSortShader, worldVertices, sourceMesh.triangles, WorldBounds, out sortedTriangleIndices);
+        }
+
+        if (sortedTriangleIndices != null && sortedTriangleIndices.Length > 0)
+        {
+            _linearBVH.BuildFromMesh(sourceMesh, SourceMeshFilter.transform, sortedTriangleIndices);
+        }
+        else
+        {
+            _meshBVH = new MeshBVH();
+            _meshBVH.Build(sourceMesh, SourceMeshFilter.transform);
+            _linearBVH.BuildFromBVH(_meshBVH);
+        }
 
         _bvhNodeBuffer = null;
         _triangleInputBuffer = null;
