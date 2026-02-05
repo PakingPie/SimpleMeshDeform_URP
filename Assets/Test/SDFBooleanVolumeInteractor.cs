@@ -30,6 +30,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
     public bool UseGpuSort = false;
     [Min(1)]
     public int MaxTrianglesForGpuSort = 50000;
+    public bool ResetToBaseBeforeOperation = false;
 
     [Header("Debug")]
     public bool ShowDebugInfo = false;
@@ -54,6 +55,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
 
     private Vector3Int _lastResolution;
     private Bounds _lastBounds;
+    private Bounds _lastToolWorldBounds;
 
     private float _nextUpdateTime;
     private bool _kernelsCached;
@@ -311,9 +313,11 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
         int[] sortedTriangleIndices = null;
         int triangleCount = toolMesh.triangles.Length / 3;
 
+        Bounds toolWorldBounds = TransformBounds(toolMesh.bounds, ToolObject.transform.localToWorldMatrix);
+        _lastToolWorldBounds = toolWorldBounds;
+
         if (UseGpuSort && BVHSortShader != null && triangleCount <= MaxTrianglesForGpuSort)
         {
-            Bounds meshBounds = TransformBounds(toolMesh.bounds, ToolObject.transform.localToWorldMatrix);
             Vector3[] localVertices = toolMesh.vertices;
             Vector3[] worldVertices = new Vector3[localVertices.Length];
             for (int i = 0; i < localVertices.Length; i++)
@@ -321,7 +325,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
                 worldVertices[i] = ToolObject.transform.TransformPoint(localVertices[i]);
             }
 
-            if (!_gpuSorter.TrySortTriangles(BVHSortShader, worldVertices, toolMesh.triangles, meshBounds, out sortedTriangleIndices))
+            if (!_gpuSorter.TrySortTriangles(BVHSortShader, worldVertices, toolMesh.triangles, toolWorldBounds, out sortedTriangleIndices))
             {
                 sortedTriangleIndices = null;
             }
@@ -357,7 +361,8 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
                 return;
             }
 
-            _toolVolume.GenerateFromMesh(nodeBuffer, triangleBuffer, _linearBVH.NodeCount);
+            float fullBandWidth = _toolVolume.WorldBounds.size.magnitude * 2f;
+            _toolVolume.GenerateFromMesh(nodeBuffer, triangleBuffer, _linearBVH.NodeCount, fullBandWidth);
             _toolVolume.Finalize();
         }
         finally
@@ -372,7 +377,16 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
         if (TargetVolume == null || TargetVolume.SDFTexture == null || _toolVolume == null || _toolVolume.VolumeTexture == null)
             return;
 
-        CopyBaseToTarget();
+        if (Operation == SDFOperations.CSGOperation.Intersect && !BoundsIntersect(TargetVolume.WorldBounds, _lastToolWorldBounds))
+        {
+            CopyBaseToTarget();
+            return;
+        }
+
+        if (ResetToBaseBeforeOperation)
+        {
+            CopyBaseToTarget();
+        }
 
         int kernel = Operation switch
         {
@@ -418,6 +432,13 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
     {
         return (a.center - b.center).sqrMagnitude < 1e-6f &&
                (a.size - b.size).sqrMagnitude < 1e-6f;
+    }
+
+    private bool BoundsIntersect(Bounds a, Bounds b)
+    {
+        return a.min.x <= b.max.x && a.max.x >= b.min.x &&
+               a.min.y <= b.max.y && a.max.y >= b.min.y &&
+               a.min.z <= b.max.z && a.max.z >= b.min.z;
     }
 
     private Bounds TransformBounds(Bounds localBounds, Matrix4x4 matrix)
