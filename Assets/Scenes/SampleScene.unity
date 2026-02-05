@@ -973,7 +973,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::SDFVolumeTest
   Resolution: {x: 64, y: 64, z: 64}
   WorldBounds:
-    m_Center: {x: 0.648, y: 0, z: 0}
+    m_Center: {x: 0.486, y: 0, z: 0.42}
     m_Extent: {x: 0.6, y: 0.6, z: 0.6}
   SourceMeshObject: {fileID: 1080112080}
   SDFGeneratorShader: {fileID: 7200000, guid: 214f00a976a69e14b94496e758fe96ba, type: 3}
@@ -1052,7 +1052,7 @@ Transform:
   m_GameObject: {fileID: 1080112080}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0.648, y: 0, z: 0}
+  m_LocalPosition: {x: 0.486, y: 0, z: 0.42}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -1400,9 +1400,9 @@ Transform:
   m_GameObject: {fileID: 1513038369}
   serializedVersion: 2
   m_LocalRotation: {x: -0.14051273, y: -0.30265626, z: -0.045164548, w: 0.94160265}
-  m_LocalPosition: {x: 0.317, y: 0.469, z: 0.013}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
+  m_LocalPosition: {x: 0.131, y: 0.983, z: 0.324}
+  m_LocalScale: {x: 0.5, y: 0.5, z: 0.5}
+  m_ConstrainProportionsScale: 1
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: -16.975, y: -35.638, z: 0}
@@ -1440,13 +1440,14 @@ MonoBehaviour:
   SDFOperationsShader: {fileID: 7200000, guid: 311e82190fa6e1946a8c565bef5fd60c, type: 3}
   BVHSortShader: {fileID: 7200000, guid: 1cd6b966009afaf449044689eb3cdae4, type: 3}
   ToolObject: {fileID: 1513038369}
-  Operation: 2
+  Operation: 0
   ToolBlend: 0
   RealTimeUpdate: 1
   AllowEditModeUpdate: 1
   MinUpdateInterval: 0.05
   UseGpuSort: 1
   MaxTrianglesForGpuSort: 50000
+  ResetToBaseBeforeOperation: 0
   ShowDebugInfo: 1
 --- !u!4 &2007970688
 Transform:

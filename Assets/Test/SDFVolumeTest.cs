@@ -21,6 +21,10 @@ public class SDFVolumeTest : MonoBehaviour
     public ComputeShader SDFGeneratorShader;
     public ComputeShader BVHSortShader;
 
+    [Header("SDF Band Width")]
+    [Tooltip("Narrow band width for SDF generation. -1 = auto (5x voxel size). Set to large value (999f) for solid interior.")]
+    public float NarrowBandWidth = -1f;
+
     [Header("Realtime Update")]
     public bool RealTimeUpdate = false;
     public bool AllowEditModeUpdate = false;
@@ -338,7 +342,7 @@ public class SDFVolumeTest : MonoBehaviour
         bufferSet.frameCreated = _frameCount;
         bufferSet.inUse = true;
 
-        GenerateSDFFromMesh(bufferSet.bvhNodeBuffer, bufferSet.triangleBuffer, _linearBVH.NodeCount);
+        GenerateSDFFromMesh(bufferSet.bvhNodeBuffer, bufferSet.triangleBuffer, _linearBVH.NodeCount, NarrowBandWidth);
     }
 
     private void GenerateSDFFromMesh(ComputeBuffer bvhNodesBuffer, ComputeBuffer trianglesBuffer,
