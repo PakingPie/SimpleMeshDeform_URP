@@ -67,6 +67,7 @@ public class SDFOperations
 
         SetVolumeParameters(volume, kernel);
         SetToolParameters(toolType, position, rotation, scale, blendRadius);
+        _operationsShader.SetInt("_UseToolSDF", 0);
         
         _operationsShader.SetTexture(kernel, "_SDFVolume", volume.VolumeTexture);
         
@@ -89,6 +90,11 @@ public class SDFOperations
 
         SetVolumeParameters(volume, kernel);
         _operationsShader.SetFloat("_ToolBlend", blendRadius);
+        _operationsShader.SetInt("_UseToolSDF", 1);
+        _operationsShader.SetVector("_ToolVolumeMin", toolVolume.WorldBounds.min);
+        _operationsShader.SetVector("_ToolVolumeMax", toolVolume.WorldBounds.max);
+        _operationsShader.SetInts("_ToolVolumeResolution", 
+            toolVolume.Resolution.x, toolVolume.Resolution.y, toolVolume.Resolution.z);
         _operationsShader.SetTexture(kernel, "_SDFVolume", volume.VolumeTexture);
         _operationsShader.SetTexture(kernel, "_ToolSDF", toolVolume.VolumeTexture);
         

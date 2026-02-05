@@ -114,7 +114,7 @@ Material:
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
-    - _MaxRayMarchingSteps: 2000
+    - _MaxRayMarchingSteps: 3000
     - _MaxVal: 1
     - _Metallic: 0
     - _MinVal: 0
