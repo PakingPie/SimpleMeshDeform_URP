@@ -848,12 +848,12 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 728746462}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 1.454, y: 0, z: 2.74}
-  m_LocalScale: {x: 1.2, y: 1.2, z: 1.2}
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0.8814816, y: -1.527431, z: -0.07293296}
+  m_LocalScale: {x: 1.4528797, y: 4.4877195, z: 0.8773489}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 0}
+  m_Father: {fileID: 1080112084}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &829072202
 GameObject:
@@ -971,17 +971,19 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 27995673b88ee6242a4b49ad2306fd7f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SDFVolumeTest
-  Resolution: {x: 64, y: 64, z: 64}
+  VoxelResolution: 64
   WorldBounds:
-    m_Center: {x: 0.486, y: 0, z: 0.42}
-    m_Extent: {x: 0.6, y: 0.6, z: 0.6}
+    m_Center: {x: -0.24251837, y: -1.527431, z: 1.1040671}
+    m_Extent: {x: 0.72643983, y: 2.2438598, z: 0.43867445}
+  BoundsPadding: 0.1
   SourceMeshObject: {fileID: 1080112080}
   SDFGeneratorShader: {fileID: 7200000, guid: 214f00a976a69e14b94496e758fe96ba, type: 3}
   BVHSortShader: {fileID: 7200000, guid: 1cd6b966009afaf449044689eb3cdae4, type: 3}
-  RealTimeUpdate: 1
-  AllowEditModeUpdate: 1
+  NarrowBandWidth: -1
+  RealTimeUpdate: 0
+  AllowEditModeUpdate: 0
   MinUpdateInterval: 0.1
-  RealtimeUseGpuSort: 1
+  RealtimeUseGpuSort: 0
   MaxTrianglesForGpuSort: 50000
   MaxRealtimeResolutionPerAxis: 128
   ShowDebugInfo: 1
@@ -993,7 +995,7 @@ MeshRenderer:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1080112080}
-  m_Enabled: 1
+  m_Enabled: 0
   m_CastShadows: 1
   m_ReceiveShadows: 1
   m_DynamicOccludee: 1
@@ -1042,7 +1044,7 @@ MeshFilter:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1080112080}
-  m_Mesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
+  m_Mesh: {fileID: -2432090755550338912, guid: 6c9527f618bd3b74e9dbde0ceff65f44, type: 3}
 --- !u!4 &1080112084
 Transform:
   m_ObjectHideFlags: 0
@@ -1052,10 +1054,11 @@ Transform:
   m_GameObject: {fileID: 1080112080}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0.486, y: 0, z: 0.42}
+  m_LocalPosition: {x: -1.124, y: 0, z: 1.177}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
-  m_Children: []
+  m_Children:
+  - {fileID: 728746466}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1217220600
@@ -1186,13 +1189,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 27995673b88ee6242a4b49ad2306fd7f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SDFVolumeTest
-  Resolution: {x: 256, y: 256, z: 256}
+  VoxelResolution: 64
   WorldBounds:
     m_Center: {x: -2.238596, y: -0.01090914, z: -0.06448728}
     m_Extent: {x: 0.990973, y: 0.95236206, z: 0.83762914}
+  BoundsPadding: 0.1
   SourceMeshObject: {fileID: 1217220600}
   SDFGeneratorShader: {fileID: 7200000, guid: 214f00a976a69e14b94496e758fe96ba, type: 3}
   BVHSortShader: {fileID: 7200000, guid: 1cd6b966009afaf449044689eb3cdae4, type: 3}
+  NarrowBandWidth: -1
   RealTimeUpdate: 1
   AllowEditModeUpdate: 1
   MinUpdateInterval: 0.1
@@ -1400,7 +1405,7 @@ Transform:
   m_GameObject: {fileID: 1513038369}
   serializedVersion: 2
   m_LocalRotation: {x: -0.14051273, y: -0.30265626, z: -0.045164548, w: 0.94160265}
-  m_LocalPosition: {x: 0.131, y: 0.983, z: 0.324}
+  m_LocalPosition: {x: 0.158, y: -1.406, z: 1.332}
   m_LocalScale: {x: 0.5, y: 0.5, z: 0.5}
   m_ConstrainProportionsScale: 1
   m_Children: []
@@ -1440,7 +1445,7 @@ MonoBehaviour:
   SDFOperationsShader: {fileID: 7200000, guid: 311e82190fa6e1946a8c565bef5fd60c, type: 3}
   BVHSortShader: {fileID: 7200000, guid: 1cd6b966009afaf449044689eb3cdae4, type: 3}
   ToolObject: {fileID: 1513038369}
-  Operation: 0
+  Operation: 1
   ToolBlend: 0
   RealTimeUpdate: 1
   AllowEditModeUpdate: 1
@@ -1583,7 +1588,6 @@ SceneRoots:
   - {fileID: 829072203}
   - {fileID: 446391472}
   - {fileID: 1217220604}
-  - {fileID: 728746466}
   - {fileID: 2007970688}
   - {fileID: 1080112084}
   - {fileID: 1513038373}

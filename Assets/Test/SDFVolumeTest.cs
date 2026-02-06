@@ -11,12 +11,18 @@ using UnityEditor;
 public class SDFVolumeTest : MonoBehaviour
 {
     [Header("SDF Volume Settings")]
-    public Vector3Int Resolution = new Vector3Int(64, 64, 64);
+    public int VoxelResolution = 64;
+    public Vector3Int Resolution => new Vector3Int(VoxelResolution, VoxelResolution, VoxelResolution);
     public Bounds WorldBounds;
+
+    [Header("Bounds Padding")]
+    [Range(0f, 0.5f)]
+    [Tooltip("Padding around mesh bounds (0 = tight fit, 0.1 = 10% padding)")]
+    public float BoundsPadding = 0.1f;
 
     [Header("Origin Mesh")]
     public GameObject SourceMeshObject;
-    
+
     [Header("Compute Shaders")]
     public ComputeShader SDFGeneratorShader;
     public ComputeShader BVHSortShader;
@@ -113,7 +119,7 @@ public class SDFVolumeTest : MonoBehaviour
     public void Run()
     {
         if (_isGenerating) return;
-        
+
         _isGenerating = true;
         try
         {
@@ -121,6 +127,14 @@ public class SDFVolumeTest : MonoBehaviour
             GenerateSDFVolume(true); // Allow GPU sort for manual runs
             FinalizeSDFVolume();
             CacheSourceState();
+
+            if (DebugObject != null)
+            {
+                DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_DataTex", _sdfTex);
+                DebugObject.transform.position = WorldBounds.center;
+                DebugObject.transform.rotation = Quaternion.identity;
+                DebugObject.transform.localScale = WorldBounds.size;
+            }
         }
         finally
         {
@@ -170,15 +184,20 @@ public class SDFVolumeTest : MonoBehaviour
             InitializeSDFVolume();
             // For real-time updates, use CPU sort by default (more stable)
             // GPU sort only if explicitly enabled and triangle count is reasonable
-            bool useGpuSort = RealtimeUseGpuSort && 
-                              BVHSortShader != null && 
+            bool useGpuSort = RealtimeUseGpuSort &&
+                              BVHSortShader != null &&
                               GetTriangleCount() <= MaxTrianglesForGpuSort;
             GenerateSDFVolume(useGpuSort);
             FinalizeSDFVolume();
-            
+
             _nextUpdateTime = currentTime + MinUpdateInterval;
-            DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_DataTex", _sdfTex);
-            DebugObject.transform.localScale = WorldBounds.size;
+            if (DebugObject != null)
+            {
+                DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_DataTex", _sdfTex);
+                DebugObject.transform.position = WorldBounds.center;
+                DebugObject.transform.rotation = Quaternion.identity;
+                DebugObject.transform.localScale = WorldBounds.size;
+            }
 
         }
         finally
@@ -235,7 +254,7 @@ public class SDFVolumeTest : MonoBehaviour
         {
             int idx = (_currentBufferIndex + i) % BufferPoolSize;
             var bufferSet = _bufferPool[idx];
-            
+
             if (!bufferSet.inUse || (_frameCount - bufferSet.frameCreated) >= FramesBeforeReuse)
             {
                 bufferSet.Release();
@@ -254,17 +273,17 @@ public class SDFVolumeTest : MonoBehaviour
     public void InitializeSDFVolume()
     {
         if (SourceMeshObject == null) return;
-        
+
         var meshFilter = SourceMeshObject.GetComponent<MeshFilter>();
         if (meshFilter == null || meshFilter.sharedMesh == null) return;
 
         Bounds bounds = meshFilter.sharedMesh.bounds;
-        Vector3 padding = bounds.size * 0.1f;
+        Vector3 padding = bounds.size * BoundsPadding;
         bounds.Expand(padding * 2);
         WorldBounds = TransformBounds(bounds, SourceMeshObject.transform.localToWorldMatrix);
 
         CreateSDFTexture();
-        
+
         _initializeKernel = SDFGeneratorShader.FindKernel("InitializeSDF");
         _meshToSDFKernel = SDFGeneratorShader.FindKernel("MeshToSDF");
         _finalizeKernel = SDFGeneratorShader.FindKernel("FinalizeSDF");
@@ -279,7 +298,7 @@ public class SDFVolumeTest : MonoBehaviour
     private void GenerateSDFVolume(bool allowGpuSort = true)
     {
         if (SourceMeshObject == null) return;
-        
+
         var meshFilter = SourceMeshObject.GetComponent<MeshFilter>();
         if (meshFilter == null || meshFilter.sharedMesh == null) return;
 
@@ -292,7 +311,7 @@ public class SDFVolumeTest : MonoBehaviour
         _linearBVH = new LinearBVH();
 
         int[] sortedTriangleIndices = null;
-        
+
         // GPU sorting path
         if (allowGpuSort && BVHSortShader != null && triangleCount <= MaxTrianglesForGpuSort)
         {
@@ -332,7 +351,7 @@ public class SDFVolumeTest : MonoBehaviour
         // Get a buffer set from the pool
         BVHBufferSet bufferSet = GetAvailableBufferSet();
         _linearBVH.CreateBuffers(out bufferSet.bvhNodeBuffer, out bufferSet.triangleBuffer);
-        
+
         if (bufferSet.bvhNodeBuffer == null || bufferSet.triangleBuffer == null)
         {
             if (ShowDebugInfo) Debug.LogWarning("Failed to create BVH buffers");
@@ -377,9 +396,8 @@ public class SDFVolumeTest : MonoBehaviour
     private void CreateSDFTexture()
     {
         // Clamp resolution to valid range
-        Resolution.x = Mathf.Clamp(Resolution.x, 4, 512);
-        Resolution.y = Mathf.Clamp(Resolution.y, 4, 512);
-        Resolution.z = Mathf.Clamp(Resolution.z, 4, 512);
+        VoxelResolution = Mathf.Clamp(VoxelResolution, 4, 512);
+
 
         if (_sdfTex != null &&
             _sdfTex.width == Resolution.x &&
@@ -409,7 +427,7 @@ public class SDFVolumeTest : MonoBehaviour
     private bool HasSourceChanged()
     {
         if (SourceMeshObject == null) return false;
-        
+
         MeshFilter meshFilter = SourceMeshObject.GetComponent<MeshFilter>();
         if (meshFilter == null || meshFilter.sharedMesh == null)
             return false;
