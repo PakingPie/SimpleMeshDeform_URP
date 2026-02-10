@@ -81,11 +81,11 @@ public class SDFVolumeTest : MonoBehaviour
         }
     }
 
-    private const int BufferPoolSize = 3; // Triple buffering
+    private const int BufferPoolSize = 3;
     private BVHBufferSet[] _bufferPool;
     private int _currentBufferIndex = 0;
     private int _frameCount = 0;
-    private const int FramesBeforeReuse = 3; // Wait 3 frames before reusing a buffer
+    private const int FramesBeforeReuse = 3;
 
     private MeshBVH _meshBVH;
     private LinearBVH _linearBVH;
@@ -93,11 +93,22 @@ public class SDFVolumeTest : MonoBehaviour
 
     private Mesh _lastMesh;
     private int _lastVertexCount;
-    private int _lastTriangleCount;
+    private int _lastIndexCount; // CHANGED: was _lastTriangleCount — now stores GetMeshIndexCount()
     private Matrix4x4 _lastTransformMatrix;
     private float _nextUpdateTime;
     private bool _realtimeBlockedLogged;
     private bool _isGenerating = false;
+
+    private const int ZGroupsPerChunk = 8;
+
+    // --- Helper: non-allocating index count ---
+    private static int GetMeshIndexCount(Mesh mesh)
+    {
+        int total = 0;
+        for (int i = 0; i < mesh.subMeshCount; i++)
+            total += (int)mesh.GetIndexCount(i);
+        return total;
+    }
 
     private void OnEnable()
     {
@@ -124,7 +135,7 @@ public class SDFVolumeTest : MonoBehaviour
         try
         {
             InitializeSDFVolume();
-            GenerateSDFVolume(true); // Allow GPU sort for manual runs
+            GenerateSDFVolume(true);
             FinalizeSDFVolume();
             CacheSourceState();
 
@@ -182,8 +193,6 @@ public class SDFVolumeTest : MonoBehaviour
         try
         {
             InitializeSDFVolume();
-            // For real-time updates, use CPU sort by default (more stable)
-            // GPU sort only if explicitly enabled and triangle count is reasonable
             bool useGpuSort = RealtimeUseGpuSort &&
                               BVHSortShader != null &&
                               GetTriangleCount() <= MaxTrianglesForGpuSort;
@@ -198,7 +207,6 @@ public class SDFVolumeTest : MonoBehaviour
                 DebugObject.transform.rotation = Quaternion.identity;
                 DebugObject.transform.localScale = WorldBounds.size;
             }
-
         }
         finally
         {
@@ -211,7 +219,7 @@ public class SDFVolumeTest : MonoBehaviour
         if (SourceMeshObject == null) return 0;
         var mf = SourceMeshObject.GetComponent<MeshFilter>();
         if (mf == null || mf.sharedMesh == null) return 0;
-        return mf.sharedMesh.triangles.Length / 3;
+        return GetMeshIndexCount(mf.sharedMesh) / 3; // CHANGED: non-allocating
     }
 
     private void OnDisable()
@@ -249,7 +257,6 @@ public class SDFVolumeTest : MonoBehaviour
     {
         InitializeBufferPool();
 
-        // Find a buffer set that's not in use or old enough to reuse
         for (int i = 0; i < BufferPoolSize; i++)
         {
             int idx = (_currentBufferIndex + i) % BufferPoolSize;
@@ -263,7 +270,6 @@ public class SDFVolumeTest : MonoBehaviour
             }
         }
 
-        // Force reuse the oldest one if all are in use
         var oldest = _bufferPool[_currentBufferIndex];
         oldest.Release();
         _currentBufferIndex = (_currentBufferIndex + 1) % BufferPoolSize;
@@ -305,8 +311,13 @@ public class SDFVolumeTest : MonoBehaviour
         Mesh sourceMesh = meshFilter.sharedMesh;
         Transform sourceTransform = SourceMeshObject.transform;
 
-        int triangleCount = sourceMesh.triangles.Length / 3;
+        int indexCount = GetMeshIndexCount(sourceMesh); // CHANGED: non-allocating
+        int triangleCount = indexCount / 3;
         if (triangleCount == 0) return;
+
+        // --- CHANGED: cache mesh arrays once to avoid redundant allocations ---
+        Vector3[] cachedVertices = sourceMesh.vertices;
+        int[] cachedTriangles = sourceMesh.triangles;
 
         _linearBVH = new LinearBVH();
 
@@ -316,29 +327,28 @@ public class SDFVolumeTest : MonoBehaviour
         if (allowGpuSort && BVHSortShader != null && triangleCount <= MaxTrianglesForGpuSort)
         {
             Bounds meshBounds = TransformBounds(sourceMesh.bounds, sourceTransform.localToWorldMatrix);
-            Vector3[] localVertices = sourceMesh.vertices;
-            Vector3[] worldVertices = new Vector3[localVertices.Length];
-            for (int i = 0; i < localVertices.Length; i++)
+            Vector3[] worldVertices = new Vector3[cachedVertices.Length];
+            for (int i = 0; i < cachedVertices.Length; i++)
             {
-                worldVertices[i] = sourceTransform.TransformPoint(localVertices[i]);
+                worldVertices[i] = sourceTransform.TransformPoint(cachedVertices[i]);
             }
 
-            if (!_gpuBVHSorter.TrySortTriangles(BVHSortShader, worldVertices, sourceMesh.triangles, meshBounds, out sortedTriangleIndices))
+            if (!_gpuBVHSorter.TrySortTriangles(BVHSortShader, worldVertices, cachedTriangles, meshBounds, out sortedTriangleIndices))
             {
                 sortedTriangleIndices = null;
             }
         }
 
-        // Build BVH
+        // Build BVH — use cached arrays to avoid re-allocating inside BVH builders
         if (sortedTriangleIndices != null && sortedTriangleIndices.Length > 0)
         {
-            _linearBVH.BuildFromMesh(sourceMesh, sourceTransform, sortedTriangleIndices);
+            _linearBVH.BuildFromMesh(cachedVertices, cachedTriangles, sourceTransform, sortedTriangleIndices);
         }
         else
         {
             // CPU path with Morton sort
             _meshBVH = new MeshBVH();
-            _meshBVH.Build(sourceMesh, sourceTransform);
+            _meshBVH.Build(cachedVertices, cachedTriangles, sourceTransform);
             _linearBVH.BuildFromBVH(_meshBVH);
         }
 
@@ -348,7 +358,6 @@ public class SDFVolumeTest : MonoBehaviour
             return;
         }
 
-        // Get a buffer set from the pool
         BVHBufferSet bufferSet = GetAvailableBufferSet();
         _linearBVH.CreateBuffers(out bufferSet.bvhNodeBuffer, out bufferSet.triangleBuffer);
 
@@ -361,11 +370,16 @@ public class SDFVolumeTest : MonoBehaviour
         bufferSet.frameCreated = _frameCount;
         bufferSet.inUse = true;
 
-        GenerateSDFFromMesh(bufferSet.bvhNodeBuffer, bufferSet.triangleBuffer, _linearBVH.NodeCount, NarrowBandWidth);
+        // --- CHANGED: pass mesh bounds for AABB early-out ---
+        Bounds rootBounds = _linearBVH.RootBounds;
+        GenerateSDFFromMesh(bufferSet.bvhNodeBuffer, bufferSet.triangleBuffer,
+                            _linearBVH.NodeCount, NarrowBandWidth,
+                            rootBounds.min, rootBounds.max);
     }
 
     private void GenerateSDFFromMesh(ComputeBuffer bvhNodesBuffer, ComputeBuffer trianglesBuffer,
-                                     int nodeCount, float narrowBandWidth = -1f)
+                                     int nodeCount, float narrowBandWidth,
+                                     Vector3 meshBoundsMin, Vector3 meshBoundsMax)
     {
         if (SDFGeneratorShader == null) return;
         if (bvhNodesBuffer == null || trianglesBuffer == null) return;
@@ -378,9 +392,12 @@ public class SDFVolumeTest : MonoBehaviour
         SDFGeneratorShader.SetBuffer(_meshToSDFKernel, "_Triangles", trianglesBuffer);
         SDFGeneratorShader.SetInt("_BVHNodeCount", nodeCount);
         SDFGeneratorShader.SetFloat("_NarrowBandWidth", narrowBandWidth);
+        SDFGeneratorShader.SetVector("_MeshBoundsMin", meshBoundsMin);
+        SDFGeneratorShader.SetVector("_MeshBoundsMax", meshBoundsMax);
         SDFGeneratorShader.SetTexture(_meshToSDFKernel, "_SDFVolume", _sdfTex);
 
-        DispatchCompute(SDFGeneratorShader, _meshToSDFKernel);
+        // --- CHANGED: chunked dispatch to prevent GPU timeouts at high resolution ---
+        DispatchComputeChunked(SDFGeneratorShader, _meshToSDFKernel);
     }
 
     public void FinalizeSDFVolume()
@@ -395,9 +412,7 @@ public class SDFVolumeTest : MonoBehaviour
 
     private void CreateSDFTexture()
     {
-        // Clamp resolution to valid range
-        VoxelResolution = Mathf.Clamp(VoxelResolution, 4, 512);
-
+        VoxelResolution = Mathf.Clamp(VoxelResolution, 4, 1024); // CHANGED: was 512
 
         if (_sdfTex != null &&
             _sdfTex.width == Resolution.x &&
@@ -433,9 +448,10 @@ public class SDFVolumeTest : MonoBehaviour
             return false;
 
         Mesh mesh = meshFilter.sharedMesh;
+        // CHANGED: use non-allocating GetMeshIndexCount instead of mesh.triangles.Length
         bool meshChanged = mesh != _lastMesh ||
                            mesh.vertexCount != _lastVertexCount ||
-                           mesh.triangles.Length != _lastTriangleCount;
+                           GetMeshIndexCount(mesh) != _lastIndexCount;
 
         bool transformChanged = SourceMeshObject.transform.localToWorldMatrix != _lastTransformMatrix;
 
@@ -455,7 +471,7 @@ public class SDFVolumeTest : MonoBehaviour
 
         _lastMesh = meshFilter.sharedMesh;
         _lastVertexCount = _lastMesh.vertexCount;
-        _lastTriangleCount = _lastMesh.triangles.Length;
+        _lastIndexCount = GetMeshIndexCount(_lastMesh); // CHANGED: non-allocating
         _lastTransformMatrix = SourceMeshObject.transform.localToWorldMatrix;
     }
 
@@ -466,13 +482,44 @@ public class SDFVolumeTest : MonoBehaviour
         shader.SetInts("_VolumeResolution", Resolution.x, Resolution.y, Resolution.z);
     }
 
+    /// <summary>
+    /// Standard full-volume dispatch. Always resets _ZSliceOffset to 0.
+    /// </summary>
     private void DispatchCompute(ComputeShader shader, int kernel)
     {
+        shader.SetInt("_ZSliceOffset", 0); // ADDED
         int threadGroupsX = Mathf.CeilToInt(Resolution.x / 8f);
         int threadGroupsY = Mathf.CeilToInt(Resolution.y / 8f);
         int threadGroupsZ = Mathf.CeilToInt(Resolution.z / 8f);
 
         shader.Dispatch(kernel, threadGroupsX, threadGroupsY, threadGroupsZ);
+    }
+
+    /// <summary>
+    /// Dispatches the kernel in Z-slice chunks to prevent GPU timeouts (TDR) at high resolution.
+    /// Falls back to a single dispatch when the volume is small enough.
+    /// </summary>
+    private void DispatchComputeChunked(ComputeShader shader, int kernel)
+    {
+        int threadGroupsX = Mathf.CeilToInt(Resolution.x / 8f);
+        int threadGroupsY = Mathf.CeilToInt(Resolution.y / 8f);
+        int totalZ = Mathf.CeilToInt(Resolution.z / 8f);
+
+        if (totalZ <= ZGroupsPerChunk)
+        {
+            shader.SetInt("_ZSliceOffset", 0);
+            shader.Dispatch(kernel, threadGroupsX, threadGroupsY, totalZ);
+            return;
+        }
+
+        for (int zStart = 0; zStart < totalZ; zStart += ZGroupsPerChunk)
+        {
+            int zCount = Mathf.Min(ZGroupsPerChunk, totalZ - zStart);
+            shader.SetInt("_ZSliceOffset", zStart * 8);
+            shader.Dispatch(kernel, threadGroupsX, threadGroupsY, zCount);
+            GL.Flush();
+        }
+        shader.SetInt("_ZSliceOffset", 0);
     }
 
     private Bounds TransformBounds(Bounds localBounds, Matrix4x4 matrix)
@@ -522,7 +569,6 @@ public class SDFVolumeTest : MonoBehaviour
             return full;
         }
 
-        // Fallback: read slice by slice
         int expectedSlice = resX * resY;
         float[] values = new float[expectedFull];
         RenderTexture sliceRT = RenderTexture.GetTemporary(resX, resY, 0, RenderTextureFormat.RFloat);
@@ -568,7 +614,6 @@ public class SDFVolumeTest : MonoBehaviour
             return;
         }
 
-        // Force GPU to finish
         GL.Flush();
 
         float[] sdfValues = ReadSDFValues(Resolution.x, Resolution.y, Resolution.z);

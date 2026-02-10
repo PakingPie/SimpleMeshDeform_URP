@@ -35,11 +35,30 @@ public class LinearBVH
     public int NodeCount => nodeCount;
 
     /// <summary>
-    /// Builds a linearized BVH directly from a mesh using an optional sorted triangle index order.
+    /// World-space AABB of the entire mesh (from the BVH root node).
+    /// Returns a zero-sized bounds at origin if the BVH is empty.
     /// </summary>
-    public void BuildFromMesh(Mesh mesh, Transform transform, int[] sortedTriangleIndices = null, int maxTrianglesPerLeaf = 4)
+    public Bounds RootBounds
     {
-        if (mesh == null)
+        get
+        {
+            if (nodes == null || nodeCount == 0)
+                return new Bounds(Vector3.zero, Vector3.zero);
+            Bounds b = new Bounds();
+            b.SetMinMax(nodes[0].boundsMin, nodes[0].boundsMax);
+            return b;
+        }
+    }
+
+    /// <summary>
+    /// Builds a linearized BVH directly from pre-allocated vertex/triangle arrays
+    /// using an optional sorted triangle index order.
+    /// This overload avoids redundant Mesh property access (which allocates).
+    /// </summary>
+    public void BuildFromMesh(Vector3[] localVertices, int[] meshTriangles, Transform transform,
+                              int[] sortedTriangleIndices = null, int maxTrianglesPerLeaf = 4)
+    {
+        if (localVertices == null || meshTriangles == null)
         {
             nodes = new LinearBVHNode[0];
             gpuTriangles = new GPUTriangle[0];
@@ -49,8 +68,6 @@ public class LinearBVH
 
         maxTrianglesPerLeaf = Mathf.Max(1, maxTrianglesPerLeaf);
 
-        Vector3[] localVertices = mesh.vertices;
-        int[] meshTriangles = mesh.triangles;
         int triangleCount = meshTriangles.Length / 3;
 
         if (triangleCount == 0)
@@ -99,10 +116,28 @@ public class LinearBVH
 
         List<GPUTriangle> triangleList = new List<GPUTriangle>(triangleCount);
         int nodeIndex = 0;
-        BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles, 
+        BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, worldVertices, meshTriangles,
                           0, triangleCount, maxTrianglesPerLeaf, ref nodeIndex, triangleList);
 
         gpuTriangles = triangleList.ToArray();
+    }
+
+    /// <summary>
+    /// Convenience overload that reads arrays from the Mesh object.
+    /// Note: accessing Mesh.vertices and Mesh.triangles allocates new arrays.
+    /// Prefer the (Vector3[], int[], Transform) overload when arrays are already cached.
+    /// </summary>
+    public void BuildFromMesh(Mesh mesh, Transform transform, int[] sortedTriangleIndices = null, int maxTrianglesPerLeaf = 4)
+    {
+        if (mesh == null)
+        {
+            nodes = new LinearBVHNode[0];
+            gpuTriangles = new GPUTriangle[0];
+            nodeCount = 0;
+            return;
+        }
+
+        BuildFromMesh(mesh.vertices, mesh.triangles, transform, sortedTriangleIndices, maxTrianglesPerLeaf);
     }
 
     /// <summary>
@@ -149,7 +184,7 @@ public class LinearBVH
         if (node.IsLeaf)
         {
             linearNode.leftOrTriangleOffset = triangleList.Count;
-            linearNode.rightChildOrCount = node.triangleIndices.Length; // Positive = leaf triangle count
+            linearNode.rightChildOrCount = node.triangleIndices.Length;
 
             foreach (int triIdx in node.triangleIndices)
             {
@@ -167,12 +202,11 @@ public class LinearBVH
         }
         else
         {
-            // Internal node - left child immediately follows
             int leftIndex = LinearizeNode(bvh, node.left, ref nodeIndex, triangleList);
             int rightIndex = LinearizeNode(bvh, node.right, ref nodeIndex, triangleList);
 
             linearNode.leftOrTriangleOffset = leftIndex;
-            linearNode.rightChildOrCount = -rightIndex; // Negative = internal node, stores right child index
+            linearNode.rightChildOrCount = -rightIndex;
         }
 
         nodes[myIndex] = linearNode;
@@ -204,7 +238,6 @@ public class LinearBVH
         int myIndex = nodeIndex;
         nodeIndex++;
 
-        // Calculate bounds for this range
         Vector3 boundsMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
         Vector3 boundsMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
 
@@ -223,9 +256,8 @@ public class LinearBVH
 
         if (count <= maxTrianglesPerLeaf)
         {
-            // Leaf node
             linearNode.leftOrTriangleOffset = triangleList.Count;
-            linearNode.rightChildOrCount = count; // Positive = triangle count
+            linearNode.rightChildOrCount = count;
 
             for (int i = 0; i < count; i++)
             {
@@ -246,19 +278,18 @@ public class LinearBVH
         }
         else
         {
-            // Internal node
             int leftCount = count / 2;
             int rightCount = count - leftCount;
 
-            int leftIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, 
-                                               worldVertices, meshTriangles, start, leftCount, 
+            int leftIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax,
+                                               worldVertices, meshTriangles, start, leftCount,
                                                maxTrianglesPerLeaf, ref nodeIndex, triangleList);
-            int rightIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax, 
-                                                worldVertices, meshTriangles, start + leftCount, rightCount, 
+            int rightIndex = BuildNodeFromRange(sortedTriangleIndices, triBoundsMin, triBoundsMax,
+                                                worldVertices, meshTriangles, start + leftCount, rightCount,
                                                 maxTrianglesPerLeaf, ref nodeIndex, triangleList);
 
             linearNode.leftOrTriangleOffset = leftIndex;
-            linearNode.rightChildOrCount = -rightIndex; // Negative = right child index
+            linearNode.rightChildOrCount = -rightIndex;
         }
 
         nodes[myIndex] = linearNode;
@@ -278,11 +309,9 @@ public class LinearBVH
             return;
         }
 
-        // Node buffer: 2 * Vector3 (24 bytes) + 2 * int (8 bytes) = 32 bytes
         nodeBuffer = new ComputeBuffer(nodes.Length, 32);
         nodeBuffer.SetData(nodes);
 
-        // Triangle buffer: 3 * (Vector3 + float) = 48 bytes
         if (gpuTriangles != null && gpuTriangles.Length > 0)
         {
             triangleBuffer = new ComputeBuffer(gpuTriangles.Length, 48);
@@ -290,7 +319,6 @@ public class LinearBVH
         }
         else
         {
-            // Create minimal dummy buffer to avoid null binding
             triangleBuffer = new ComputeBuffer(1, 48);
             triangleBuffer.SetData(new GPUTriangle[1]);
         }

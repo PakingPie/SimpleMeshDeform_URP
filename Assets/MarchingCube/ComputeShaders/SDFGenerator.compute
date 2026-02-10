@@ -36,6 +36,13 @@ int _BVHNodeCount;
 float _InitialValue;
 float _NarrowBandWidth;
 
+// --- NEW: Chunked dispatch Z offset (in voxels) ---
+int _ZSliceOffset;
+
+// --- NEW: Mesh AABB for early-out (set from BVH root bounds) ---
+float3 _MeshBoundsMin;
+float3 _MeshBoundsMax;
+
 // Stack for BVH traversal
 #define MAX_STACK_DEPTH 64
 
@@ -281,7 +288,7 @@ float DetermineSign(float3 vertex, float3 closestPoint)
             LinearBVHNode node = _BVHNodes[nodeIdx];
             
             // Ray-AABB intersection
-            float3 invDir = 1.0 / (dir + float3(1e-10, 1e-10, 1e-10)); // Avoid division by zero
+            float3 invDir = 1.0 / (dir + float3(1e-10, 1e-10, 1e-10));
             float3 t0 = (node.boundsMin - vertex) * invDir;
             float3 t1 = (node.boundsMax - vertex) * invDir;
             float3 tmin3 = min(t0, t1);
@@ -302,7 +309,6 @@ float DetermineSign(float3 vertex, float3 closestPoint)
                 {
                     GPUTriangle tri = _Triangles[triOffset + i];
                     
-                    // Möller–Trumbore ray-triangle intersection
                     float3 edge1 = tri.v1 - tri.v0;
                     float3 edge2 = tri.v2 - tri.v0;
                     float3 h = cross(dir, edge2);
@@ -349,7 +355,7 @@ float DetermineSign(float3 vertex, float3 closestPoint)
             }
         }
         
-        if ((intersectionCount & 1) == 1) // Odd number = inside
+        if ((intersectionCount & 1) == 1)
             insideVotes++;
     }
     
@@ -371,26 +377,38 @@ void InitializeSDF(uint3 id : SV_DispatchThreadID)
 [numthreads(8, 8, 8)]
 void MeshToSDF(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= (uint)_VolumeResolution.x ||
-        id.y >= (uint)_VolumeResolution.y ||
-        id.z >= (uint)_VolumeResolution.z)
+    // --- CHANGED: apply Z offset for chunked dispatch ---
+    uint3 globalId = uint3(id.x, id.y, id.z + (uint)_ZSliceOffset);
+
+    if (globalId.x >= (uint)_VolumeResolution.x ||
+        globalId.y >= (uint)_VolumeResolution.y ||
+        globalId.z >= (uint)_VolumeResolution.z)
         return;
     
-    float3 worldPos = VoxelToWorld(int3(id));
+    float3 worldPos = VoxelToWorld(int3(globalId));
+
+    // --- NEW: AABB early-out — skip voxels far from the mesh bounding box ---
+    float aabbDistSq = DistanceToBoundsSq(worldPos, _MeshBoundsMin, _MeshBoundsMax);
+    if (aabbDistSq > _NarrowBandWidth * _NarrowBandWidth)
+    {
+        _SDFVolume[globalId] = _NarrowBandWidth;
+        return;
+    }
+
     float3 closestPoint;
     float distance = QueryBVH(worldPos, closestPoint);
     
     // Apply narrow band optimization
     if (distance > _NarrowBandWidth)
     {
-        _SDFVolume[id] = _NarrowBandWidth;
+        _SDFVolume[globalId] = _NarrowBandWidth;
         return;
     }
     
     // Determine sign (inside = negative, outside = positive)
     float sign = DetermineSign(worldPos, closestPoint);
     
-    _SDFVolume[id] = distance * sign;
+    _SDFVolume[globalId] = distance * sign;
 }
 
 [numthreads(8, 8, 8)]

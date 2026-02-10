@@ -12,18 +12,20 @@ public class SDFVolume : IDisposable
     public RenderTexture VolumeTexture { get; private set; }
     public Vector3Int Resolution { get; private set; }
     public Bounds WorldBounds { get; private set; }
-    public float VoxelSize => (WorldBounds.size.x / Resolution.x + 
-                               WorldBounds.size.y / Resolution.y + 
+    public float VoxelSize => (WorldBounds.size.x / Resolution.x +
+                               WorldBounds.size.y / Resolution.y +
                                WorldBounds.size.z / Resolution.z) / 3f;
 
     private ComputeShader _sdfGeneratorShader;
     private ComputeShader _sdfOperationsShader;
-    
+
     private int _initializeKernel;
     private int _meshToSDFKernel;
     private int _finalizeKernel;
-    
+
     private bool _disposed;
+
+    private const int ZGroupsPerChunk = 8;
 
     public SDFVolume(Vector3Int resolution, Bounds worldBounds, ComputeShader sdfGeneratorShader, ComputeShader sdfOperationsShader)
     {
@@ -31,7 +33,7 @@ public class SDFVolume : IDisposable
         WorldBounds = worldBounds;
         _sdfGeneratorShader = sdfGeneratorShader;
         _sdfOperationsShader = sdfOperationsShader;
-        
+
         CreateVolumeTexture();
         CacheKernels();
     }
@@ -66,6 +68,20 @@ public class SDFVolume : IDisposable
     }
 
     /// <summary>
+    /// Update bounds and optionally recreate the texture if resolution changed.
+    /// Avoids unnecessary texture recreation when only bounds move.
+    /// </summary>
+    public void SetBoundsAndResize(Bounds newBounds, Vector3Int newResolution)
+    {
+        WorldBounds = newBounds;
+        if (newResolution != Resolution || VolumeTexture == null)
+        {
+            Resolution = newResolution;
+            CreateVolumeTexture();
+        }
+    }
+
+    /// <summary>
     /// Initialize the SDF volume with a constant value.
     /// </summary>
     public void Initialize(float value = 1f)
@@ -81,15 +97,17 @@ public class SDFVolume : IDisposable
 
     /// <summary>
     /// Generate SDF from mesh using BVH acceleration.
+    /// meshBoundsMin/Max are used for the AABB early-out optimisation in the shader.
     /// </summary>
-    public void GenerateFromMesh(ComputeBuffer bvhNodesBuffer, ComputeBuffer trianglesBuffer, 
-                                  int nodeCount, float narrowBandWidth = -1f)
+    public void GenerateFromMesh(ComputeBuffer bvhNodesBuffer, ComputeBuffer trianglesBuffer,
+                                  int nodeCount, float narrowBandWidth,
+                                  Vector3 meshBoundsMin, Vector3 meshBoundsMax)
     {
         if (_sdfGeneratorShader == null) return;
 
         if (narrowBandWidth < 0)
         {
-            narrowBandWidth = VoxelSize * 5f; // Default: 5 voxels
+            narrowBandWidth = VoxelSize * 5f;
         }
 
         SetCommonParameters(_sdfGeneratorShader);
@@ -97,9 +115,11 @@ public class SDFVolume : IDisposable
         _sdfGeneratorShader.SetBuffer(_meshToSDFKernel, "_Triangles", trianglesBuffer);
         _sdfGeneratorShader.SetInt("_BVHNodeCount", nodeCount);
         _sdfGeneratorShader.SetFloat("_NarrowBandWidth", narrowBandWidth);
+        _sdfGeneratorShader.SetVector("_MeshBoundsMin", meshBoundsMin);
+        _sdfGeneratorShader.SetVector("_MeshBoundsMax", meshBoundsMax);
         _sdfGeneratorShader.SetTexture(_meshToSDFKernel, "_SDFVolume", VolumeTexture);
 
-        DispatchCompute(_sdfGeneratorShader, _meshToSDFKernel);
+        DispatchComputeChunked(_sdfGeneratorShader, _meshToSDFKernel);
     }
 
     /// <summary>
@@ -125,23 +145,13 @@ public class SDFVolume : IDisposable
             newResolution = Resolution;
         }
 
-        // Store old texture reference
         var oldTexture = VolumeTexture;
-        var oldBounds = WorldBounds;
-        var oldResolution = Resolution;
 
-        // Create new texture
         Resolution = newResolution;
         WorldBounds = newBounds;
         CreateVolumeTexture();
-
-        // Initialize new volume
         Initialize(1f);
 
-        // TODO: Copy overlapping region from old to new texture
-        // This requires a separate compute shader for resampling
-
-        // Release old texture
         if (oldTexture != null)
         {
             oldTexture.Release();
@@ -155,7 +165,7 @@ public class SDFVolume : IDisposable
     {
         Vector3 paddedMin = meshBounds.min - Vector3.one * padding;
         Vector3 paddedMax = meshBounds.max + Vector3.one * padding;
-        
+
         Bounds newBounds = new Bounds();
         newBounds.SetMinMax(
             Vector3.Min(WorldBounds.min, paddedMin),
@@ -164,7 +174,6 @@ public class SDFVolume : IDisposable
 
         if (newBounds.size != WorldBounds.size)
         {
-            // Calculate new resolution to maintain voxel size
             float targetVoxelSize = VoxelSize;
             Vector3Int newRes = new Vector3Int(
                 Mathf.CeilToInt(newBounds.size.x / targetVoxelSize),
@@ -172,7 +181,6 @@ public class SDFVolume : IDisposable
                 Mathf.CeilToInt(newBounds.size.z / targetVoxelSize)
             );
 
-            // Clamp resolution to reasonable limits
             newRes.x = Mathf.Clamp(newRes.x, 16, 256);
             newRes.y = Mathf.Clamp(newRes.y, 16, 256);
             newRes.z = Mathf.Clamp(newRes.z, 16, 256);
@@ -194,13 +202,10 @@ public class SDFVolume : IDisposable
             localPos.z / WorldBounds.size.z
         );
 
-        // Clamp to valid range
         normalized.x = Mathf.Clamp01(normalized.x);
         normalized.y = Mathf.Clamp01(normalized.y);
         normalized.z = Mathf.Clamp01(normalized.z);
 
-        // This would require ReadPixels which is slow
-        // For actual usage, sample in compute shader
         Debug.LogWarning("CPU-side SDF sampling is slow. Use GPU sampling when possible.");
         return 0f;
     }
@@ -212,25 +217,58 @@ public class SDFVolume : IDisposable
         shader.SetInts("_VolumeResolution", Resolution.x, Resolution.y, Resolution.z);
     }
 
+    /// <summary>
+    /// Standard full-volume dispatch. Always resets _ZSliceOffset to 0.
+    /// </summary>
     private void DispatchCompute(ComputeShader shader, int kernel)
     {
+        shader.SetInt("_ZSliceOffset", 0);
         int threadGroupsX = Mathf.CeilToInt(Resolution.x / 8f);
         int threadGroupsY = Mathf.CeilToInt(Resolution.y / 8f);
         int threadGroupsZ = Mathf.CeilToInt(Resolution.z / 8f);
-        
+
         shader.Dispatch(kernel, threadGroupsX, threadGroupsY, threadGroupsZ);
+    }
+
+    /// <summary>
+    /// Dispatches the kernel in Z-slice chunks to prevent GPU timeouts at high resolution.
+    /// Falls back to a single dispatch when the volume is small enough.
+    /// </summary>
+    private void DispatchComputeChunked(ComputeShader shader, int kernel)
+    {
+        int threadGroupsX = Mathf.CeilToInt(Resolution.x / 8f);
+        int threadGroupsY = Mathf.CeilToInt(Resolution.y / 8f);
+        int totalZ = Mathf.CeilToInt(Resolution.z / 8f);
+
+        if (totalZ <= ZGroupsPerChunk)
+        {
+            // Small volume — single dispatch, no overhead
+            shader.SetInt("_ZSliceOffset", 0);
+            shader.Dispatch(kernel, threadGroupsX, threadGroupsY, totalZ);
+            return;
+        }
+
+        for (int zStart = 0; zStart < totalZ; zStart += ZGroupsPerChunk)
+        {
+            int zCount = Mathf.Min(ZGroupsPerChunk, totalZ - zStart);
+            shader.SetInt("_ZSliceOffset", zStart * 8);
+            shader.Dispatch(kernel, threadGroupsX, threadGroupsY, zCount);
+            GL.Flush();
+        }
+        // Reset so subsequent non-chunked dispatches are not affected
+        shader.SetInt("_ZSliceOffset", 0);
     }
 
     public void Dispose()
     {
         if (_disposed) return;
-        
+
         if (VolumeTexture != null)
         {
             VolumeTexture.Release();
             VolumeTexture = null;
         }
-        
+
         _disposed = true;
     }
 }

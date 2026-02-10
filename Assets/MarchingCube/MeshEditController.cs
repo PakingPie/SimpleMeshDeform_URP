@@ -371,7 +371,8 @@ public class MeshEditController : MonoBehaviour
             _sdfVolume.Initialize(1f);
 
             // Generate SDF from mesh using BVH-accelerated distance queries
-            _sdfVolume.GenerateFromMesh(bvhNodeBuffer, triangleBuffer, _linearBVH.NodeCount);
+            _sdfVolume.GenerateFromMesh(bvhNodeBuffer, triangleBuffer, _linearBVH.NodeCount, 1f,
+                                        _originalMesh.bounds.min, _originalMesh.bounds.max);
 
             // Optional: Finalize/smooth the SDF
             _sdfVolume.Finalize();

@@ -12,7 +12,7 @@ public class MeshBVH
         public Bounds bounds;
         public BVHNode left;
         public BVHNode right;
-        public int[] triangleIndices; // Only for leaf nodes
+        public int[] triangleIndices;
         public bool IsLeaf => triangleIndices != null;
     }
 
@@ -27,28 +27,22 @@ public class MeshBVH
     public int[] Triangles => triangles;
 
     /// <summary>
-    /// Builds the BVH from a mesh.
+    /// Builds the BVH from pre-allocated vertex/triangle arrays.
+    /// This overload avoids redundant Mesh property access (which allocates).
     /// </summary>
-    /// <param name="mesh">The source mesh</param>
-    /// <param name="transform">Transform to convert to world space</param>
-    /// <param name="maxTrianglesPerLeaf">Max triangles before subdivision stops</param>
-    /// <param name="maxDepth">Maximum tree depth</param>
-    public void Build(Mesh mesh, Transform transform, int maxTrianglesPerLeaf = 4, int maxDepth = 25)
+    public void Build(Vector3[] localVertices, int[] triangleIndices, Transform transform,
+                      int maxTrianglesPerLeaf = 4, int maxDepth = 25)
     {
         this.maxTrianglesPerLeaf = maxTrianglesPerLeaf;
         this.maxDepth = maxDepth;
+        this.triangles = triangleIndices;
 
-        Vector3[] localVertices = mesh.vertices;
-        triangles = mesh.triangles;
-
-        // Transform vertices to world space
         worldVertices = new Vector3[localVertices.Length];
         for (int i = 0; i < localVertices.Length; i++)
         {
             worldVertices[i] = transform.TransformPoint(localVertices[i]);
         }
 
-        // Create list of all triangle indices
         int triangleCount = triangles.Length / 3;
         List<int> allTriangles = new List<int>(triangleCount);
         for (int i = 0; i < triangleCount; i++)
@@ -56,10 +50,19 @@ public class MeshBVH
             allTriangles.Add(i);
         }
 
-        // Build tree recursively
         root = BuildNode(allTriangles, 0);
 
         Debug.Log($"MeshBVH built: {triangleCount} triangles, depth up to {maxDepth}");
+    }
+
+    /// <summary>
+    /// Convenience overload that reads arrays from the Mesh object.
+    /// Note: accessing Mesh.vertices and Mesh.triangles allocates new arrays.
+    /// Prefer the (Vector3[], int[], Transform) overload when arrays are already cached.
+    /// </summary>
+    public void Build(Mesh mesh, Transform transform, int maxTrianglesPerLeaf = 4, int maxDepth = 25)
+    {
+        Build(mesh.vertices, mesh.triangles, transform, maxTrianglesPerLeaf, maxDepth);
     }
 
     private BVHNode BuildNode(List<int> triangleIndices, int depth)
@@ -67,21 +70,18 @@ public class MeshBVH
         BVHNode node = new BVHNode();
         node.bounds = CalculateBounds(triangleIndices);
 
-        // Create leaf if conditions met
         if (triangleIndices.Count <= maxTrianglesPerLeaf || depth >= maxDepth)
         {
             node.triangleIndices = triangleIndices.ToArray();
             return node;
         }
 
-        // Find longest axis for split
         Vector3 size = node.bounds.size;
         int axis;
         if (size.x >= size.y && size.x >= size.z) axis = 0;
         else if (size.y >= size.x && size.y >= size.z) axis = 1;
         else axis = 2;
 
-        // Sort triangles by centroid along axis
         triangleIndices.Sort((a, b) =>
         {
             Vector3 centroidA = GetTriangleCentroid(a);
@@ -89,7 +89,6 @@ public class MeshBVH
             return centroidA[axis].CompareTo(centroidB[axis]);
         });
 
-        // Split in half
         int mid = triangleIndices.Count / 2;
         if (mid == 0) mid = 1;
 
@@ -138,15 +137,6 @@ public class MeshBVH
         return (worldVertices[i0] + worldVertices[i1] + worldVertices[i2]) / 3f;
     }
 
-    /// <summary>
-    /// Casts a ray against the mesh and returns the closest hit point.
-    /// </summary>
-    /// <param name="origin">Ray origin in world space</param>
-    /// <param name="direction">Ray direction (normalized)</param>
-    /// <param name="hitPoint">Output hit point</param>
-    /// <param name="hitDistance">Output distance to hit</param>
-    /// <param name="maxDistance">Maximum ray distance</param>
-    /// <returns>True if hit</returns>
     public bool Raycast(Vector3 origin, Vector3 direction, out Vector3 hitPoint, out float hitDistance, float maxDistance = float.MaxValue)
     {
         hitPoint = Vector3.zero;
@@ -159,7 +149,6 @@ public class MeshBVH
 
     private bool RaycastNode(BVHNode node, Vector3 origin, Vector3 direction, ref Vector3 hitPoint, ref float hitDistance)
     {
-        // Check bounds first
         if (!RayIntersectsBounds(origin, direction, node.bounds, hitDistance))
             return false;
 
@@ -208,9 +197,6 @@ public class MeshBVH
         return tmax >= 0 && tmin <= tmax && tmin <= maxDist;
     }
 
-    /// <summary>
-    /// Möller–Trumbore ray-triangle intersection algorithm.
-    /// </summary>
     private bool RayTriangleIntersection(Vector3 origin, Vector3 direction, int triIdx, out Vector3 hitPoint, out float distance)
     {
         hitPoint = Vector3.zero;
@@ -230,7 +216,7 @@ public class MeshBVH
         float a = Vector3.Dot(edge1, h);
 
         if (Mathf.Abs(a) < 0.0001f)
-            return false; // Parallel to triangle
+            return false;
 
         float f = 1f / a;
         Vector3 s = origin - v0;
@@ -257,9 +243,6 @@ public class MeshBVH
         return false;
     }
 
-    /// <summary>
-    /// Finds the closest point on the mesh surface to the given point.
-    /// </summary>
     public Vector3 ClosestPointOnMesh(Vector3 point, out float distance)
     {
         distance = float.MaxValue;
@@ -273,7 +256,6 @@ public class MeshBVH
 
     private void ClosestPointOnNode(BVHNode node, Vector3 point, ref Vector3 closestPoint, ref float closestDistance)
     {
-        // Check if this node could contain a closer point
         float boundsDist = DistanceToBounds(point, node.bounds);
         if (boundsDist >= closestDistance)
             return;
@@ -293,7 +275,6 @@ public class MeshBVH
             return;
         }
 
-        // Check children - visit closer one first
         float leftDist = DistanceToBounds(point, node.left.bounds);
         float rightDist = DistanceToBounds(point, node.right.bounds);
 
@@ -325,7 +306,6 @@ public class MeshBVH
         Vector3 b = worldVertices[i1];
         Vector3 c = worldVertices[i2];
 
-        // Check if point projects inside triangle
         Vector3 ab = b - a;
         Vector3 ac = c - a;
         Vector3 ap = point - a;

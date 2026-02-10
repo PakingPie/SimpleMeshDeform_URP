@@ -32,6 +32,11 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
     public int MaxTrianglesForGpuSort = 50000;
     public bool ResetToBaseBeforeOperation = false;
 
+    [Header("Tool Volume")]
+    [Tooltip("Max resolution per axis for the tool SDF volume")]
+    [Min(8)]
+    public int MaxToolResolution = 128;
+
     [Header("Debug")]
     public bool ShowDebugInfo = false;
 
@@ -45,12 +50,12 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
 
     private Mesh _lastToolMesh;
     private int _lastToolVertexCount;
-    private int _lastToolTriangleCount;
+    private int _lastToolIndexCount; // CHANGED: was _lastToolTriangleCount
     private Matrix4x4 _lastToolTransform;
 
     private Mesh _lastSourceMesh;
     private int _lastSourceVertexCount;
-    private int _lastSourceTriangleCount;
+    private int _lastSourceIndexCount; // CHANGED: was _lastSourceTriangleCount
     private Matrix4x4 _lastSourceTransform;
 
     private Vector3Int _lastResolution;
@@ -64,6 +69,15 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
 
     private SDFOperations.CSGOperation _lastOperation;
     private float _lastBlend;
+
+    // --- Helper: non-allocating index count ---
+    private static int GetMeshIndexCount(Mesh mesh)
+    {
+        int total = 0;
+        for (int i = 0; i < mesh.subMeshCount; i++)
+            total += (int)mesh.GetIndexCount(i);
+        return total;
+    }
 
     private void OnEnable()
     {
@@ -116,7 +130,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
         if (TargetVolume.SDFTexture == null)
             return;
 
-        EnsureVolumes();
+        EnsureBaseTexture(); // CHANGED: was EnsureVolumes — no longer touches tool volume
 
         bool targetChanged = HasTargetChanged();
         if (targetChanged)
@@ -128,6 +142,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
         bool toolChanged = HasToolChanged();
         if (toolChanged)
         {
+            EnsureToolVolume(); // ADDED: creates/resizes tool volume with tight bounds
             GenerateToolSDF();
         }
 
@@ -154,24 +169,17 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
         }
     }
 
-    private void EnsureVolumes()
+    /// <summary>
+    /// Ensures the base snapshot texture exists and matches the target.
+    /// Does NOT manage the tool volume (that is handled by EnsureToolVolume).
+    /// </summary>
+    private void EnsureBaseTexture()
     {
         Vector3Int resolution = TargetVolume.Resolution;
         Bounds bounds = TargetVolume.WorldBounds;
 
         bool boundsChanged = !BoundsApproximatelyEqual(bounds, _lastBounds);
         bool resolutionChanged = resolution != _lastResolution;
-
-        if (_toolVolume == null)
-        {
-            _toolVolume = new SDFVolume(resolution, bounds, SDFGeneratorShader, SDFOperationsShader);
-            boundsChanged = true;
-            resolutionChanged = true;
-        }
-        else if (boundsChanged || resolutionChanged)
-        {
-            _toolVolume.Resize(bounds, resolution);
-        }
 
         if (_baseSdfTex == null || boundsChanged || resolutionChanged)
         {
@@ -181,6 +189,43 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
 
         _lastBounds = bounds;
         _lastResolution = resolution;
+    }
+
+    /// <summary>
+    /// Creates or resizes the tool SDF volume with tight bounds around the tool mesh.
+    /// Resolution is chosen to match the target's voxel density, clamped to MaxToolResolution.
+    /// </summary>
+    private void EnsureToolVolume()
+    {
+        if (ToolObject == null || TargetVolume == null) return;
+
+        MeshFilter mf = ToolObject.GetComponent<MeshFilter>();
+        if (mf == null || mf.sharedMesh == null) return;
+
+        // Compute world-space tool bounds
+        Bounds toolWorldBounds = TransformBounds(mf.sharedMesh.bounds, ToolObject.transform.localToWorldMatrix);
+
+        // Add padding so SDF at volume edges is clearly positive (outside)
+        float voxelSize = TargetVolume.VoxelSize;
+        if (voxelSize < 1e-6f) voxelSize = 0.01f;
+        float padding = Mathf.Max(voxelSize * 4f, toolWorldBounds.size.magnitude * 0.05f);
+        toolWorldBounds.Expand(padding * 2f);
+
+        // Resolution to match target voxel density
+        Vector3Int toolRes = new Vector3Int(
+            Mathf.Clamp(Mathf.CeilToInt(toolWorldBounds.size.x / voxelSize), 8, MaxToolResolution),
+            Mathf.Clamp(Mathf.CeilToInt(toolWorldBounds.size.y / voxelSize), 8, MaxToolResolution),
+            Mathf.Clamp(Mathf.CeilToInt(toolWorldBounds.size.z / voxelSize), 8, MaxToolResolution)
+        );
+
+        if (_toolVolume == null)
+        {
+            _toolVolume = new SDFVolume(toolRes, toolWorldBounds, SDFGeneratorShader, SDFOperationsShader);
+        }
+        else
+        {
+            _toolVolume.SetBoundsAndResize(toolWorldBounds, toolRes);
+        }
     }
 
     private void CreateBaseTexture(Vector3Int resolution)
@@ -228,9 +273,10 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
             return false;
 
         Mesh mesh = meshFilter.sharedMesh;
+        // CHANGED: non-allocating
         bool meshChanged = mesh != _lastSourceMesh ||
                            mesh.vertexCount != _lastSourceVertexCount ||
-                           mesh.triangles.Length != _lastSourceTriangleCount;
+                           GetMeshIndexCount(mesh) != _lastSourceIndexCount;
 
         bool transformChanged = TargetVolume.SourceMeshObject.transform.localToWorldMatrix != _lastSourceTransform;
 
@@ -252,7 +298,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
 
         _lastSourceMesh = meshFilter.sharedMesh;
         _lastSourceVertexCount = _lastSourceMesh.vertexCount;
-        _lastSourceTriangleCount = _lastSourceMesh.triangles.Length;
+        _lastSourceIndexCount = GetMeshIndexCount(_lastSourceMesh); // CHANGED: non-allocating
         _lastSourceTransform = TargetVolume.SourceMeshObject.transform.localToWorldMatrix;
     }
 
@@ -266,9 +312,10 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
             return false;
 
         Mesh mesh = meshFilter.sharedMesh;
+        // CHANGED: non-allocating
         bool meshChanged = mesh != _lastToolMesh ||
                            mesh.vertexCount != _lastToolVertexCount ||
-                           mesh.triangles.Length != _lastToolTriangleCount;
+                           GetMeshIndexCount(mesh) != _lastToolIndexCount;
 
         bool transformChanged = ToolObject.transform.localToWorldMatrix != _lastToolTransform;
 
@@ -290,7 +337,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
 
         _lastToolMesh = meshFilter.sharedMesh;
         _lastToolVertexCount = _lastToolMesh.vertexCount;
-        _lastToolTriangleCount = _lastToolMesh.triangles.Length;
+        _lastToolIndexCount = GetMeshIndexCount(_lastToolMesh); // CHANGED: non-allocating
         _lastToolTransform = ToolObject.transform.localToWorldMatrix;
     }
 
@@ -304,37 +351,42 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
             return;
 
         Mesh toolMesh = meshFilter.sharedMesh;
-        if (toolMesh.triangles.Length == 0)
+        int indexCount = GetMeshIndexCount(toolMesh); // CHANGED: non-allocating
+        if (indexCount == 0)
             return;
+
+        // --- CHANGED: cache mesh arrays once ---
+        Vector3[] cachedVertices = toolMesh.vertices;
+        int[] cachedTriangles = toolMesh.triangles;
 
         _toolVolume.Initialize(1f);
 
         int[] sortedTriangleIndices = null;
-        int triangleCount = toolMesh.triangles.Length / 3;
+        int triangleCount = indexCount / 3;
 
         if (UseGpuSort && BVHSortShader != null && triangleCount <= MaxTrianglesForGpuSort)
         {
             Bounds meshBounds = TransformBounds(toolMesh.bounds, ToolObject.transform.localToWorldMatrix);
-            Vector3[] localVertices = toolMesh.vertices;
-            Vector3[] worldVertices = new Vector3[localVertices.Length];
-            for (int i = 0; i < localVertices.Length; i++)
+            Vector3[] worldVertices = new Vector3[cachedVertices.Length];
+            for (int i = 0; i < cachedVertices.Length; i++)
             {
-                worldVertices[i] = ToolObject.transform.TransformPoint(localVertices[i]);
+                worldVertices[i] = ToolObject.transform.TransformPoint(cachedVertices[i]);
             }
 
-            if (!_gpuSorter.TrySortTriangles(BVHSortShader, worldVertices, toolMesh.triangles, meshBounds, out sortedTriangleIndices))
+            if (!_gpuSorter.TrySortTriangles(BVHSortShader, worldVertices, cachedTriangles, meshBounds, out sortedTriangleIndices))
             {
                 sortedTriangleIndices = null;
             }
         }
 
+        // Build BVH using cached arrays
         if (sortedTriangleIndices != null && sortedTriangleIndices.Length > 0)
         {
-            _linearBVH.BuildFromMesh(toolMesh, ToolObject.transform, sortedTriangleIndices);
+            _linearBVH.BuildFromMesh(cachedVertices, cachedTriangles, ToolObject.transform, sortedTriangleIndices);
         }
         else
         {
-            _meshBVH.Build(toolMesh, ToolObject.transform);
+            _meshBVH.Build(cachedVertices, cachedTriangles, ToolObject.transform);
             _linearBVH.BuildFromBVH(_meshBVH);
         }
 
@@ -358,8 +410,11 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
                 return;
             }
 
+            // Full bandwidth — tool SDF needs correct interior signs for CSG
             float fullBandWidth = _toolVolume.WorldBounds.size.magnitude * 2f;
-            _toolVolume.GenerateFromMesh(nodeBuffer, triangleBuffer, _linearBVH.NodeCount, fullBandWidth);
+            Bounds meshRootBounds = _linearBVH.RootBounds; // ADDED: pass mesh bounds
+            _toolVolume.GenerateFromMesh(nodeBuffer, triangleBuffer, _linearBVH.NodeCount,
+                                         fullBandWidth, meshRootBounds.min, meshRootBounds.max);
             _toolVolume.Finalize();
         }
         finally
@@ -392,7 +447,7 @@ public class SDFBooleanVolumeInteractor : MonoBehaviour
         SDFOperationsShader.SetInt("_UseToolSDF", 1);
         SDFOperationsShader.SetVector("_ToolVolumeMin", _toolVolume.WorldBounds.min);
         SDFOperationsShader.SetVector("_ToolVolumeMax", _toolVolume.WorldBounds.max);
-        SDFOperationsShader.SetInts("_ToolVolumeResolution", 
+        SDFOperationsShader.SetInts("_ToolVolumeResolution",
             _toolVolume.Resolution.x, _toolVolume.Resolution.y, _toolVolume.Resolution.z);
         SDFOperationsShader.SetTexture(kernel, "_SDFVolume", TargetVolume.SDFTexture);
         SDFOperationsShader.SetTexture(kernel, "_ToolSDF", _toolVolume.VolumeTexture);

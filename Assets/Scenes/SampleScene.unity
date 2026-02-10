@@ -849,7 +849,7 @@ Transform:
   m_GameObject: {fileID: 728746462}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0.8814816, y: -1.527431, z: -0.07293296}
+  m_LocalPosition: {x: 0.8814815, y: -1.5274311, z: -0.07293296}
   m_LocalScale: {x: 1.4528797, y: 4.4877195, z: 0.8773489}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -971,9 +971,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 27995673b88ee6242a4b49ad2306fd7f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SDFVolumeTest
-  VoxelResolution: 64
+  VoxelResolution: 500
   WorldBounds:
-    m_Center: {x: -0.24251837, y: -1.527431, z: 1.1040671}
+    m_Center: {x: -1.7095186, y: -0.052431107, z: 1.1040671}
     m_Extent: {x: 0.72643983, y: 2.2438598, z: 0.43867445}
   BoundsPadding: 0.1
   SourceMeshObject: {fileID: 1080112080}
@@ -985,8 +985,8 @@ MonoBehaviour:
   MinUpdateInterval: 0.1
   RealtimeUseGpuSort: 0
   MaxTrianglesForGpuSort: 50000
-  MaxRealtimeResolutionPerAxis: 128
-  ShowDebugInfo: 1
+  MaxRealtimeResolutionPerAxis: 512
+  ShowDebugInfo: 0
   DebugObject: {fileID: 728746462}
 --- !u!23 &1080112082
 MeshRenderer:
@@ -1054,7 +1054,7 @@ Transform:
   m_GameObject: {fileID: 1080112080}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -1.124, y: 0, z: 1.177}
+  m_LocalPosition: {x: -2.591, y: 1.475, z: 1.177}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -1404,13 +1404,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1513038369}
   serializedVersion: 2
-  m_LocalRotation: {x: -0.14051273, y: -0.30265626, z: -0.045164548, w: 0.94160265}
-  m_LocalPosition: {x: 0.158, y: -1.406, z: 1.332}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -0.023, y: 0.91, z: 1.231}
   m_LocalScale: {x: 0.5, y: 0.5, z: 0.5}
   m_ConstrainProportionsScale: 1
   m_Children: []
   m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: -16.975, y: -35.638, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &2007970686
 GameObject:
   m_ObjectHideFlags: 0
@@ -1453,6 +1453,7 @@ MonoBehaviour:
   UseGpuSort: 1
   MaxTrianglesForGpuSort: 50000
   ResetToBaseBeforeOperation: 0
+  MaxToolResolution: 128
   ShowDebugInfo: 1
 --- !u!4 &2007970688
 Transform:
