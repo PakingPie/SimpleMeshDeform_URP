@@ -10,7 +10,7 @@ Shader "Unlit/ImprovedVolumeRender"
         [KeywordEnum(TEX1D, TEX2D)] _TF("Transfer Function Type", Float) = 0
         _TransferFunctionTexture("Transfer Function Texture", 2D) = "white" {}
         _NoiseTexture("Noise Texture", 2D) = "white" {}
-        _MaxGradientMagnitude("Max Gradient Magnitude", Range(0.1, 5.0)) = 1.0
+        _MaxGradientMagnitude("Max Gradient Magnitude", Range(0.01, 5.0)) = 1.0
 
         [Header(Cross Sections)]
         [Toggle(CROSS_SECTION_ON)]_EnableCrossSection("Enable Cross Section", Float) = 0
@@ -272,15 +272,14 @@ Shader "Unlit/ImprovedVolumeRender"
                 return g / (2.0 * delta);
             }
 
-            // [NEW] Multi-scale gradient: blend fine + coarse central diffs.
-            //  Coarse scale acts as low-pass filter → smoother normals on
-            //  bone surfaces.  Fine scale preserves small-feature detail.
-            //  Total cost: 12 tex reads instead of 6.
             float3 SampleGradient(float3 pos)
             {
                 #if defined(GRADIENT_TEXTURE)
-                    return tex3Dlod(_GradientTexture, float4(pos, 0)).rgb
-                    * 2.0 - 1.0;
+                    // Per-voxel central differences stored in RGBAHalf.
+                    // Values are in [-0.5, 0.5] — same sign convention as
+                    // CentralDiffGradient.  _MaxGradientMagnitude is auto-set
+                    // from C# to match this range, so normGrad works correctly.
+                    return tex3Dlod(_GradientTexture, float4(pos, 0)).rgb;
                 #elif defined(SMOOTH_GRADIENT)
                     float3 gFine   = CentralDiffGradient(pos, _GradientDelta);
                     float3 gCoarse = CentralDiffGradient(pos,
@@ -678,6 +677,11 @@ Shader "Unlit/ImprovedVolumeRender"
                 normGradMag);
                 float3 lighting = lerp(volLight, surfLight, blend);
 
+                // [REMOVED] This was a second msBoost application — the first is
+                // already in volDirect.  Double application was causing 1.3²= 1.7×
+                // overbright:
+                //   lighting *= msBoost;   // ← DELETE THIS LINE
+
                 lighting *= ao;
 
                 return albedo * lighting + sss;
@@ -772,7 +776,11 @@ Shader "Unlit/ImprovedVolumeRender"
                     return output;
                 #elif defined(_DEBUG_PHASE)
                     float ct = dot(lightDir, rayDir);
-                    float ph = EvaluatePhase(ct);
+                    bool headlight = true;
+                    #if defined(USE_MAIN_LIGHT)
+                        headlight = false;
+                    #endif
+                    float ph = EvaluatePhase(ct, headlight);  // ← pass both args
                     ph = saturate(ph * 0.25);
                     output.color = float4(ph.xxx, 1);
                     return output;
@@ -817,8 +825,8 @@ Shader "Unlit/ImprovedVolumeRender"
                         float  dw       = 0;
                         bool   dbgFound = false;
 
-                        int dbgMaxSteps = min(numSteps, 256);
-                        [loop] for (int dbgI = 0; dbgI < dbgMaxSteps; dbgI++)
+
+                        [loop] for (int dbgI = 0; dbgI < numSteps; dbgI++)
                         {
                             float dbgT = ((float)dbgI + 0.5) / (float)numSteps;
                             float3 dbgP = lerp(rayStart, rayEnd, dbgT);
@@ -1006,7 +1014,10 @@ Shader "Unlit/ImprovedVolumeRender"
                             #endif
 
                             // ---- multi-scatter boost ----------------------------
-                            float msBoost = MultiScatterBoost(transmittance);
+                            float accumulatedAlpha = 1.0 - transmittance;
+                            float msBoost = 1.0 + _MultiScatterStrength 
+                            * saturate(accumulatedAlpha * 2.0)  // ramps with opacity buildup
+                            / (1.0 - _MultiScatterStrength * _MultiScatterPhaseAtten + 1e-4);
 
                             // ---- lighting ---------------------------------------
                             float3 lit = ComputeHybridLighting(

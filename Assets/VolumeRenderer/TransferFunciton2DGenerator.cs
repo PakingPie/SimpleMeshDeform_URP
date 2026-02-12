@@ -18,11 +18,13 @@ public class TransferFunction2DGenerator : MonoBehaviour
 
         [Header("Density (X axis)")]
         public Vector2 densityRange = new Vector2(0.3f, 0.7f);
+        [Tooltip("Evaluated symmetrically: 0 = edge of range, 1 = center")]
         public AnimationCurve densityFalloff = DefaultSmoothFalloff();
 
         [Header("Gradient Magnitude (Y axis)")]
         public Vector2 gradientRange = new Vector2(0.0f, 1.0f);
-        public AnimationCurve gradientFalloff = DefaultFlatFalloff();
+        [Tooltip("Evaluated linearly across the range: t=0 at gradientRange.x, t=1 at gradientRange.y")]
+        public AnimationCurve gradientFalloff = DefaultFlatCurve();
 
         [Header("Appearance")]
         public Gradient colorGradient = DefaultWhiteGradient();
@@ -30,10 +32,10 @@ public class TransferFunction2DGenerator : MonoBehaviour
         public float baseOpacity = 0.5f;
 
         [Header("Boundary Emphasis")]
-        [Tooltip("Boost opacity at high gradient magnitudes (surface enhancement)")]
+        [Tooltip("Extra opacity boost interpolated from boundaryThreshold → 1.0 on the normalized gradient axis")]
         [Range(0f, 1f)]
         public float boundaryBoost = 0.0f;
-        [Tooltip("Gradient threshold where boundary boost begins")]
+        [Tooltip("Normalized gradient threshold where boundary boost begins")]
         [Range(0f, 1f)]
         public float boundaryThreshold = 0.3f;
 
@@ -49,10 +51,9 @@ public class TransferFunction2DGenerator : MonoBehaviour
                 new Keyframe(0.5f, 0.8f, 1.5f, 1.5f),
                 new Keyframe(1f, 1f, 0f, 0f));
         }
-        static AnimationCurve DefaultFlatFalloff()
+        static AnimationCurve DefaultFlatCurve()
         {
-            return new AnimationCurve(
-                new Keyframe(0f, 1f), new Keyframe(1f, 1f));
+            return AnimationCurve.Linear(0f, 1f, 1f, 1f);
         }
         static Gradient DefaultWhiteGradient()
         {
@@ -71,9 +72,9 @@ public class TransferFunction2DGenerator : MonoBehaviour
     // =========================================================================
     public enum BlendMode
     {
-        Additive,       // sum contributions, clamp to 1
-        Max,            // per-region, keep highest alpha
-        FrontToBack     // original compositing order
+        Additive,
+        Max,
+        FrontToBack
     }
 
     // =========================================================================
@@ -106,19 +107,17 @@ public class TransferFunction2DGenerator : MonoBehaviour
 
             tfTexture2D = new Texture2D(resolution, resolution,
                                         TextureFormat.RGBAHalf, false);
-            tfTexture2D.wrapMode = TextureWrapMode.Clamp;
+            tfTexture2D.wrapMode  = TextureWrapMode.Clamp;
             tfTexture2D.filterMode = FilterMode.Bilinear;
             tfTexture2D.name = "TF2D_Generated";
         }
 
         Color[] pixels = new Color[resolution * resolution];
-
         float invRes = 1f / (resolution - 1);
 
         for (int y = 0; y < resolution; y++)
         {
-            float gradMag = y * invRes;
-
+            float gradMag = y * invRes;   // 0 = flat interior, 1 = sharpest boundary
             for (int x = 0; x < resolution; x++)
             {
                 float density = x * invRes;
@@ -147,12 +146,15 @@ public class TransferFunction2DGenerator : MonoBehaviour
         }
     }
 
-    // --- Additive: weighted sum of all regions, clamped --------------------
+    // =========================================================================
+    // Blending modes
+    // =========================================================================
+
+    // --- Additive: weighted sum, alpha-weighted color averaging -------------
     Color ComputeAdditive(float density, float gradMag)
     {
-        float3c acc = new float3c();
+        float accR = 0f, accG = 0f, accB = 0f;
         float totalAlpha = 0f;
-        float totalWeight = 0f;
 
         foreach (var region in regions)
         {
@@ -164,32 +166,31 @@ public class TransferFunction2DGenerator : MonoBehaviour
             float normDensity = NormalizeToDensityRange(density, region);
             Color col = region.colorGradient.Evaluate(normDensity);
 
-            float alpha = ComputeRegionAlpha(region, gradMag) * w;
+            float alpha = ComputeRegionAlpha(region, gradMag) * w * region.weight;
 
-            acc.r += col.r * alpha * region.weight;
-            acc.g += col.g * alpha * region.weight;
-            acc.b += col.b * alpha * region.weight;
-            totalAlpha += alpha * region.weight;
-            totalWeight += w * region.weight;
+            // Premultiplied accumulation
+            accR += col.r * alpha;
+            accG += col.g * alpha;
+            accB += col.b * alpha;
+            totalAlpha += alpha;
         }
 
+        // Scale by global opacity
         totalAlpha *= globalOpacityScale;
 
-        // Normalize color by total alpha to avoid oversaturation
-        if (totalAlpha > 0.001f)
+        // Recover straight color from premultiplied accumulation
+        float rawAlpha = totalAlpha / Mathf.Max(globalOpacityScale, 0.001f);
+        if (rawAlpha > 0.001f)
         {
-            float invA = globalOpacityScale / Mathf.Max(totalAlpha / globalOpacityScale, 0.001f);
-            // Actually: weighted average color, then apply alpha
-            // The acc already has premultiplied alpha, so divide to get straight color
-            acc.r /= (totalAlpha / globalOpacityScale);
-            acc.g /= (totalAlpha / globalOpacityScale);
-            acc.b /= (totalAlpha / globalOpacityScale);
+            accR /= rawAlpha;
+            accG /= rawAlpha;
+            accB /= rawAlpha;
         }
 
         return new Color(
-            Mathf.Clamp01(acc.r),
-            Mathf.Clamp01(acc.g),
-            Mathf.Clamp01(acc.b),
+            Mathf.Clamp01(accR),
+            Mathf.Clamp01(accG),
+            Mathf.Clamp01(accB),
             Mathf.Clamp01(totalAlpha));
     }
 
@@ -206,8 +207,8 @@ public class TransferFunction2DGenerator : MonoBehaviour
             float w = ComputeRegionWeight(region, density, gradMag);
             if (w < 0.001f) continue;
 
-            float alpha = ComputeRegionAlpha(region, gradMag) * w * region.weight;
-            alpha *= globalOpacityScale;
+            float alpha = ComputeRegionAlpha(region, gradMag)
+                        * w * region.weight * globalOpacityScale;
 
             if (alpha > bestAlpha)
             {
@@ -220,7 +221,7 @@ public class TransferFunction2DGenerator : MonoBehaviour
         return best;
     }
 
-    // --- Front-to-back: original compositing (order-dependent) -------------
+    // --- Front-to-back compositing (order-dependent) -----------------------
     Color ComputeFrontToBack(float density, float gradMag)
     {
         Color finalColor = Color.clear;
@@ -236,8 +237,8 @@ public class TransferFunction2DGenerator : MonoBehaviour
             float normDensity = NormalizeToDensityRange(density, region);
             Color col = region.colorGradient.Evaluate(normDensity);
 
-            float alpha = ComputeRegionAlpha(region, gradMag) * w
-                        * region.weight * globalOpacityScale;
+            float alpha = ComputeRegionAlpha(region, gradMag)
+                        * w * region.weight * globalOpacityScale;
 
             float remaining = 1f - finalColor.a;
             finalColor.r += remaining * alpha * col.r;
@@ -254,17 +255,15 @@ public class TransferFunction2DGenerator : MonoBehaviour
     }
 
     // =========================================================================
-    // Helpers
+    // Core helpers
     // =========================================================================
-
-    struct float3c { public float r, g, b; }
 
     float ComputeRegionWeight(TF2DRegion region, float density, float gradMag)
     {
-        float dw = EvaluateAxisWeight(density, region.densityRange,
-                                      region.densityFalloff);
-        float gw = EvaluateAxisWeight(gradMag, region.gradientRange,
-                                      region.gradientFalloff);
+        float dw = EvaluateDensityWeight(density, region.densityRange,
+                                         region.densityFalloff);
+        float gw = EvaluateGradientWeight(gradMag, region.gradientRange,
+                                          region.gradientFalloff);
         return dw * gw;
     }
 
@@ -272,7 +271,6 @@ public class TransferFunction2DGenerator : MonoBehaviour
     {
         float alpha = region.baseOpacity;
 
-        // Boundary emphasis: boost opacity at high gradient magnitudes
         if (region.boundaryBoost > 0f)
         {
             float boundaryFactor = Mathf.InverseLerp(
@@ -282,23 +280,45 @@ public class TransferFunction2DGenerator : MonoBehaviour
             alpha = Mathf.Lerp(alpha, Mathf.Min(alpha + region.boundaryBoost, 1f),
                                boundaryFactor);
         }
-
         return alpha;
     }
 
-    float EvaluateAxisWeight(float value, Vector2 range, AnimationCurve falloff)
+    /// <summary>
+    /// Density axis: SYMMETRIC falloff around the center of the range.
+    /// Good for selecting a density band (e.g. "bone = 0.5–0.8").
+    /// Curve input: 0 = at the edge, 1 = at the center.
+    /// </summary>
+    float EvaluateDensityWeight(float value, Vector2 range, AnimationCurve falloff)
     {
-        float center = (range.x + range.y) * 0.5f;
+        float center    = (range.x + range.y) * 0.5f;
         float halfWidth = (range.y - range.x) * 0.5f;
-
         if (halfWidth <= 0f) return 0f;
 
-        float distFromCenter = Mathf.Abs(value - center);
-        float normalizedDist = distFromCenter / halfWidth;
-
+        float normalizedDist = Mathf.Abs(value - center) / halfWidth;
         if (normalizedDist > 1f) return 0f;
 
         return falloff.Evaluate(1f - normalizedDist);
+    }
+
+    /// <summary>
+    /// Gradient axis: LINEAR mapping across the range.
+    /// Curve input: t=0 at gradientRange.x, t=1 at gradientRange.y.
+    ///
+    /// This lets you define:
+    ///   - Ramp-up curve (0→1): HIGH-PASS — surfaces only
+    ///   - Ramp-down curve (1→0): LOW-PASS — interiors only
+    ///   - Flat curve (1→1):  BAND-PASS — entire gradient range
+    ///   - Bell curve: peaks at the middle of the gradient range
+    /// </summary>
+    float EvaluateGradientWeight(float value, Vector2 range, AnimationCurve falloff)
+    {
+        if (value < range.x || value > range.y) return 0f;
+
+        float span = range.y - range.x;
+        if (span <= 0f) return 0f;
+
+        float t = (value - range.x) / span;  // 0 at range.x → 1 at range.y
+        return falloff.Evaluate(t);
     }
 
     float NormalizeToDensityRange(float density, TF2DRegion region)
@@ -311,143 +331,203 @@ public class TransferFunction2DGenerator : MonoBehaviour
     public Texture2D GetTexture() => tfTexture2D;
 
     // =========================================================================
-    // Presets
+    // Curve factory helpers (used by presets)
     // =========================================================================
-    public static class MedicalTFPresets
+
+    /// <summary>Ramp 0→1: use for gradient HIGH-PASS (surfaces).</summary>
+    static AnimationCurve RampUpCurve()
     {
-        // --- falloff curves --------------------------------------------------
-        static AnimationCurve SmoothFalloff => new AnimationCurve(
+        return new AnimationCurve(
+            new Keyframe(0f, 0f, 0f, 2f),
+            new Keyframe(0.4f, 0.6f, 1.5f, 1.5f),
+            new Keyframe(1f, 1f, 0.5f, 0f));
+    }
+
+    /// <summary>Ramp 1→0: use for gradient LOW-PASS (interiors).</summary>
+    static AnimationCurve RampDownCurve()
+    {
+        return new AnimationCurve(
+            new Keyframe(0f, 1f, 0f, -0.5f),
+            new Keyframe(0.6f, 0.4f, -1.5f, -1.5f),
+            new Keyframe(1f, 0f, -2f, 0f));
+    }
+
+    /// <summary>Flat at 1: entire range contributes equally.</summary>
+    static AnimationCurve FlatCurve()
+    {
+        return AnimationCurve.Linear(0f, 1f, 1f, 1f);
+    }
+
+    /// <summary>Smooth density falloff (symmetric, center-peaked).</summary>
+    static AnimationCurve SmoothDensityFalloff()
+    {
+        return new AnimationCurve(
             new Keyframe(0f, 0f, 0f, 0f),
             new Keyframe(0.5f, 0.8f, 1.5f, 1.5f),
             new Keyframe(1f, 1f, 0f, 0f));
+    }
 
-        static AnimationCurve SharpFalloff => new AnimationCurve(
+    /// <summary>Sharp density falloff (steep edges, wide plateau).</summary>
+    static AnimationCurve SharpDensityFalloff()
+    {
+        return new AnimationCurve(
             new Keyframe(0f, 0f, 0f, 0f),
-            new Keyframe(0.2f, 0.9f, 2f, 2f),
-            new Keyframe(1f, 1f, 0f, 0f));
+            new Keyframe(0.15f, 0.85f, 3f, 3f),
+            new Keyframe(0.85f, 0.85f, 0f, 0f),
+            new Keyframe(1f, 1f, 3f, 0f));
+    }
 
-        static AnimationCurve FlatFalloff => new AnimationCurve(
-            new Keyframe(0f, 1f), new Keyframe(1f, 1f));
+    static AnimationCurve FlatDensityFalloff()
+    {
+        return AnimationCurve.Linear(0f, 1f, 1f, 1f);
+    }
 
-        // Falloff that only lets high values through (for gradient gating)
-        static AnimationCurve HighPassFalloff => new AnimationCurve(
-            new Keyframe(0f, 0f, 0f, 0f),
-            new Keyframe(0.7f, 0.5f, 2f, 2f),
-            new Keyframe(1f, 1f, 0f, 0f));
-
-        static Gradient CreateGradient(params (float time, Color color)[] keys)
+    static Gradient CreateGradient(params (float time, Color color)[] keys)
+    {
+        var gradient = new Gradient();
+        var colorKeys = new GradientColorKey[keys.Length];
+        var alphaKeys = new GradientAlphaKey[keys.Length];
+        for (int i = 0; i < keys.Length; i++)
         {
-            var gradient = new Gradient();
-            var colorKeys = new GradientColorKey[keys.Length];
-            var alphaKeys = new GradientAlphaKey[keys.Length];
-            for (int i = 0; i < keys.Length; i++)
-            {
-                colorKeys[i] = new GradientColorKey(keys[i].color, keys[i].time);
-                alphaKeys[i] = new GradientAlphaKey(keys[i].color.a, keys[i].time);
-            }
-            gradient.SetKeys(colorKeys, alphaKeys);
-            return gradient;
+            colorKeys[i] = new GradientColorKey(keys[i].color, keys[i].time);
+            alphaKeys[i] = new GradientAlphaKey(keys[i].color.a, keys[i].time);
         }
+        gradient.SetKeys(colorKeys, alphaKeys);
+        return gradient;
+    }
 
-        // =================================================================
-        // Bone Preset
-        //   - Uses gradient gating to sharpen bone surfaces
-        //   - Interior bone is semi-transparent, surfaces are opaque
-        // =================================================================
+    // =========================================================================
+    // Presets — redesigned for working gradient axis
+    // =========================================================================
+    //
+    //  Key concept:
+    //    X axis = density (normalized HU)
+    //    Y axis = normalized gradient magnitude (0 = flat, 1 = sharpest edge)
+    //
+    //  Levoy (1988) 2D TF approach:
+    //    • Interior regions → LOW gradient  → low-pass on Y (RampDown)
+    //    • Surface regions  → HIGH gradient → high-pass on Y (RampUp)
+    //    • Background       → any gradient  → Flat on Y
+    //
+    // =========================================================================
+    public static class MedicalTFPresets
+    {
+        // =============================================================
+        // BONE
+        // =============================================================
         public static List<TF2DRegion> GetBonePreset()
         {
             return new List<TF2DRegion>
             {
+                // Air / background — always transparent
                 new TF2DRegion
                 {
                     name = "Background",
-                    densityRange = new Vector2(0.0f, 0.15f),
-                    densityFalloff = FlatFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, Color.black), (1f, Color.black)),
-                    baseOpacity = 0.0f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                    enabled = true,
+                    densityRange   = new Vector2(0.0f, 0.12f),
+                    densityFalloff = FlatDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient((0f, Color.black), (1f, Color.black)),
+                    baseOpacity    = 0.0f,
+                    boundaryBoost  = 0f,
+                    weight = 1f
                 },
-                // Soft tissue: low opacity interior, boundary-enhanced surfaces
+
+                // Soft tissue INTERIOR — very faint, only low-gradient voxels
                 new TF2DRegion
                 {
-                    name = "Soft Tissue",
-                    densityRange = new Vector2(0.15f, 0.45f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
+                    name = "Soft Tissue Interior",
+                    enabled = true,
+                    densityRange   = new Vector2(0.15f, 0.45f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 0.5f),   // low gradient only
+                    gradientFalloff = RampDownCurve(),            // ← LOW-PASS
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.8f, 0.5f, 0.4f)),
                         (1f, new Color(0.9f, 0.6f, 0.5f))),
-                    baseOpacity = 0.03f,
-                    boundaryBoost = 0.15f,
-                    boundaryThreshold = 0.3f,
-                    weight = 1f,
-                    enabled = true
+                    baseOpacity    = 0.02f,
+                    boundaryBoost  = 0f,
+                    weight = 1f
                 },
-                // Cancellous bone interior
+
+                // Soft tissue SURFACE — boundary-gated skin/organ surface
+                new TF2DRegion
+                {
+                    name = "Soft Tissue Surface",
+                    enabled = true,
+                    densityRange   = new Vector2(0.15f, 0.50f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.15f, 1.0f),  // medium-to-high gradient
+                    gradientFalloff = RampUpCurve(),              // ← HIGH-PASS
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.90f, 0.65f, 0.55f)),
+                        (1f, new Color(0.95f, 0.72f, 0.62f))),
+                    baseOpacity    = 0.12f,
+                    boundaryBoost  = 0.2f,
+                    boundaryThreshold = 0.4f,
+                    weight = 1f
+                },
+
+                // Cancellous bone INTERIOR — low gradient, mid-high density
                 new TF2DRegion
                 {
                     name = "Cancellous Bone",
-                    densityRange = new Vector2(0.4f, 0.65f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 0.5f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
+                    enabled = true,
+                    densityRange   = new Vector2(0.40f, 0.68f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 0.45f),  // interior only
+                    gradientFalloff = RampDownCurve(),            // ← LOW-PASS
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.75f, 0.65f, 0.55f)),
                         (0.5f, new Color(0.85f, 0.75f, 0.65f)),
                         (1f, new Color(0.90f, 0.82f, 0.72f))),
-                    baseOpacity = 0.3f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                    baseOpacity    = 0.35f,
+                    boundaryBoost  = 0f,
+                    weight = 1f
                 },
-                // Bone surface: high gradient = boundary, gets strong opacity
+
+                // Bone SURFACE — high gradient = boundary → opaque
                 new TF2DRegion
                 {
                     name = "Bone Surface",
-                    densityRange = new Vector2(0.4f, 0.75f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.25f, 1.0f),
-                    gradientFalloff = HighPassFalloff,
-                    colorGradient = CreateGradient(
+                    enabled = true,
+                    densityRange   = new Vector2(0.38f, 0.80f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.2f, 1.0f),   // surface
+                    gradientFalloff = RampUpCurve(),              // ← HIGH-PASS
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.92f, 0.88f, 0.80f)),
                         (1f, new Color(1.0f, 0.97f, 0.92f))),
-                    baseOpacity = 0.85f,
-                    boundaryBoost = 0.15f,
-                    boundaryThreshold = 0.4f,
-                    weight = 1.2f,
-                    enabled = true
+                    baseOpacity    = 0.85f,
+                    boundaryBoost  = 0.15f,
+                    boundaryThreshold = 0.5f,
+                    weight = 1.2f
                 },
-                // Dense cortical bone
+
+                // Dense cortical bone — high density, any gradient
                 new TF2DRegion
                 {
                     name = "Cortical Bone",
-                    densityRange = new Vector2(0.6f, 1.0f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
+                    enabled = true,
+                    densityRange   = new Vector2(0.62f, 1.0f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),               // all gradients
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.92f, 0.90f, 0.85f)),
                         (0.5f, new Color(0.97f, 0.95f, 0.90f)),
                         (1f, new Color(1.0f, 1.0f, 0.98f))),
-                    baseOpacity = 0.9f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                    baseOpacity    = 0.90f,
+                    boundaryBoost  = 0f,
+                    weight = 1f
                 }
             };
         }
 
-        // =================================================================
-        // Soft Tissue Preset
-        //   - Skin surface highlighted via gradient gating
-        //   - Interior tissue transparent, surfaces opaque
-        // =================================================================
+        // =============================================================
+        // SOFT TISSUE
+        // =============================================================
         public static List<TF2DRegion> GetSoftTissuePreset()
         {
             return new List<TF2DRegion>
@@ -455,108 +535,107 @@ public class TransferFunction2DGenerator : MonoBehaviour
                 new TF2DRegion
                 {
                     name = "Background",
-                    densityRange = new Vector2(0.0f, 0.2f),
-                    densityFalloff = FlatFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, Color.black), (1f, Color.black)),
+                    enabled = true,
+                    densityRange   = new Vector2(0.0f, 0.18f),
+                    densityFalloff = FlatDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient((0f, Color.black), (1f, Color.black)),
                     baseOpacity = 0.0f,
-                    weight = 1f,
-                    enabled = true
+                    weight = 1f
                 },
-                // Fat: low opacity, subtle
+
+                // Fat INTERIOR — faint fog
                 new TF2DRegion
                 {
-                    name = "Fat",
-                    densityRange = new Vector2(0.2f, 0.35f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
+                    name = "Fat Interior",
+                    enabled = true,
+                    densityRange   = new Vector2(0.18f, 0.35f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 0.4f),
+                    gradientFalloff = RampDownCurve(),
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.9f, 0.8f, 0.4f)),
                         (1f, new Color(1.0f, 0.9f, 0.5f))),
-                    baseOpacity = 0.05f,
-                    boundaryBoost = 0.1f,
-                    boundaryThreshold = 0.3f,
-                    weight = 1f,
-                    enabled = true
+                    baseOpacity = 0.03f,
+                    weight = 1f
                 },
-                // Muscle interior: semi-transparent
+
+                // Muscle INTERIOR — low gradient
                 new TF2DRegion
                 {
-                    name = "Muscle",
-                    densityRange = new Vector2(0.3f, 0.5f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 0.4f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.6f, 0.25f, 0.22f)),
+                    name = "Muscle Interior",
+                    enabled = true,
+                    densityRange   = new Vector2(0.30f, 0.52f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 0.35f),
+                    gradientFalloff = RampDownCurve(),
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.60f, 0.25f, 0.22f)),
                         (0.5f, new Color(0.75f, 0.32f, 0.28f)),
                         (1f, new Color(0.85f, 0.40f, 0.35f))),
-                    baseOpacity = 0.15f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                    baseOpacity = 0.10f,
+                    weight = 1f
                 },
-                // Skin/tissue surface: gradient-gated for boundary detection
+
+                // Skin / organ SURFACE — gradient-gated boundaries
                 new TF2DRegion
                 {
-                    name = "Skin Surface",
-                    densityRange = new Vector2(0.25f, 0.55f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.2f, 1.0f),
-                    gradientFalloff = HighPassFalloff,
-                    colorGradient = CreateGradient(
+                    name = "Skin / Organ Surface",
+                    enabled = true,
+                    densityRange   = new Vector2(0.20f, 0.58f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.15f, 1.0f),
+                    gradientFalloff = RampUpCurve(),
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.92f, 0.72f, 0.62f)),
                         (0.5f, new Color(1.0f, 0.80f, 0.70f)),
                         (1f, new Color(1.0f, 0.85f, 0.75f))),
-                    baseOpacity = 0.6f,
+                    baseOpacity = 0.55f,
                     boundaryBoost = 0.35f,
-                    boundaryThreshold = 0.3f,
-                    weight = 1.3f,
-                    enabled = true
+                    boundaryThreshold = 0.4f,
+                    weight = 1.3f
                 },
-                // Organ boundaries: mid-density + high gradient
+
+                // Organ boundary highlights — mid-density high-gradient
                 new TF2DRegion
                 {
                     name = "Organ Boundaries",
-                    densityRange = new Vector2(0.35f, 0.6f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.35f, 1.0f),
-                    gradientFalloff = HighPassFalloff,
-                    colorGradient = CreateGradient(
+                    enabled = true,
+                    densityRange   = new Vector2(0.35f, 0.62f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.3f, 1.0f),
+                    gradientFalloff = RampUpCurve(),
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.85f, 0.55f, 0.50f)),
                         (1f, new Color(0.95f, 0.70f, 0.65f))),
-                    baseOpacity = 0.5f,
+                    baseOpacity = 0.45f,
                     boundaryBoost = 0.3f,
-                    boundaryThreshold = 0.4f,
-                    weight = 1f,
-                    enabled = true
+                    boundaryThreshold = 0.45f,
+                    weight = 1f
                 },
+
+                // Bone — high density, all gradients
                 new TF2DRegion
                 {
                     name = "Bone",
-                    densityRange = new Vector2(0.5f, 1.0f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
+                    enabled = true,
+                    densityRange   = new Vector2(0.52f, 1.0f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.9f, 0.88f, 0.82f)),
                         (1f, new Color(1.0f, 1.0f, 0.95f))),
-                    baseOpacity = 0.8f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                    baseOpacity = 0.75f,
+                    weight = 1f
                 }
             };
         }
 
-        // =================================================================
-        // Vessel Preset
-        //   - Contrast-enhanced vessels highlighted
-        //   - Surrounding tissue very transparent
-        // =================================================================
+        // =============================================================
+        // VESSEL
+        // =============================================================
         public static List<TF2DRegion> GetVesselPreset()
         {
             return new List<TF2DRegion>
@@ -564,90 +643,90 @@ public class TransferFunction2DGenerator : MonoBehaviour
                 new TF2DRegion
                 {
                     name = "Background",
-                    densityRange = new Vector2(0.0f, 0.3f),
-                    densityFalloff = FlatFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, Color.black), (1f, Color.black)),
+                    enabled = true,
+                    densityRange   = new Vector2(0.0f, 0.25f),
+                    densityFalloff = FlatDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient((0f, Color.black), (1f, Color.black)),
                     baseOpacity = 0.0f,
-                    weight = 1f,
-                    enabled = true
+                    weight = 1f
                 },
+
+                // Surrounding tissue — very transparent
                 new TF2DRegion
                 {
-                    name = "Soft Tissue",
-                    densityRange = new Vector2(0.25f, 0.5f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
+                    name = "Surrounding Tissue",
+                    enabled = true,
+                    densityRange   = new Vector2(0.22f, 0.48f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 0.5f),
+                    gradientFalloff = RampDownCurve(),
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.7f, 0.5f, 0.45f)),
                         (1f, new Color(0.8f, 0.6f, 0.55f))),
-                    baseOpacity = 0.02f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                    baseOpacity = 0.015f,
+                    weight = 1f
                 },
-                // Vessel walls: use gradient gating to highlight boundaries
+
+                // Vessel WALL — high gradient at vessel-tissue boundary
                 new TF2DRegion
                 {
-                    name = "Vessel Walls",
-                    densityRange = new Vector2(0.4f, 0.75f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.3f, 1.0f),
-                    gradientFalloff = HighPassFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.8f, 0.15f, 0.1f)),
+                    name = "Vessel Wall",
+                    enabled = true,
+                    densityRange   = new Vector2(0.38f, 0.78f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.25f, 1.0f),
+                    gradientFalloff = RampUpCurve(),
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.8f, 0.15f, 0.10f)),
                         (1f, new Color(1.0f, 0.35f, 0.25f))),
-                    baseOpacity = 0.7f,
+                    baseOpacity = 0.70f,
                     boundaryBoost = 0.3f,
-                    boundaryThreshold = 0.35f,
-                    weight = 1.2f,
-                    enabled = true
+                    boundaryThreshold = 0.4f,
+                    weight = 1.2f
                 },
-                // Vessel interior: contrast-filled lumen
+
+                // Vessel LUMEN (contrast-filled interior) — low gradient,
+                // high density
                 new TF2DRegion
                 {
                     name = "Vessel Lumen",
-                    densityRange = new Vector2(0.5f, 0.85f),
-                    densityFalloff = SharpFalloff,
-                    gradientRange = new Vector2(0.0f, 0.4f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.7f, 0.1f, 0.1f)),
-                        (0.4f, new Color(0.9f, 0.2f, 0.15f)),
-                        (0.7f, new Color(1.0f, 0.3f, 0.2f)),
-                        (1f, new Color(1.0f, 0.5f, 0.4f))),
-                    baseOpacity = 0.9f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                    enabled = true,
+                    densityRange   = new Vector2(0.48f, 0.88f),
+                    densityFalloff = SharpDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 0.35f),
+                    gradientFalloff = RampDownCurve(),            // ← interior only
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.70f, 0.10f, 0.10f)),
+                        (0.4f, new Color(0.90f, 0.20f, 0.15f)),
+                        (0.7f, new Color(1.0f, 0.30f, 0.20f)),
+                        (1f, new Color(1.0f, 0.50f, 0.40f))),
+                    baseOpacity = 0.90f,
+                    weight = 1f
                 },
+
+                // Bone — subdued so vessels stand out
                 new TF2DRegion
                 {
                     name = "Bone",
-                    densityRange = new Vector2(0.7f, 1.0f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
+                    enabled = true,
+                    densityRange   = new Vector2(0.72f, 1.0f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient(
                         (0f, new Color(0.9f, 0.9f, 0.85f)),
                         (1f, new Color(1.0f, 1.0f, 0.95f))),
-                    baseOpacity = 0.25f,
-                    boundaryBoost = 0f,
-                    weight = 0.8f,
-                    enabled = true
+                    baseOpacity = 0.20f,
+                    weight = 0.8f
                 }
             };
         }
 
-        // =================================================================
-        // Lung Preset
-        //   - Airway walls via gradient gating
-        //   - Parenchyma as faint fog
-        //   - Nodules highlighted with sharp falloff
-        // =================================================================
+        // =============================================================
+        // LUNG
+        // =============================================================
         public static List<TF2DRegion> GetLungPreset()
         {
             return new List<TF2DRegion>
@@ -655,99 +734,102 @@ public class TransferFunction2DGenerator : MonoBehaviour
                 new TF2DRegion
                 {
                     name = "Air",
-                    densityRange = new Vector2(0.0f, 0.08f),
-                    densityFalloff = FlatFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, Color.black), (1f, Color.black)),
+                    enabled = true,
+                    densityRange   = new Vector2(0.0f, 0.06f),
+                    densityFalloff = FlatDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient((0f, Color.black), (1f, Color.black)),
                     baseOpacity = 0.0f,
-                    weight = 1f,
-                    enabled = true
+                    weight = 1f
                 },
-                // Lung parenchyma: faint volumetric fog
+
+                // Lung parenchyma INTERIOR — faint volumetric fog
                 new TF2DRegion
                 {
-                    name = "Lung Parenchyma",
-                    densityRange = new Vector2(0.05f, 0.3f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 0.35f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.4f, 0.5f, 0.7f)),
+                    name = "Parenchyma Interior",
+                    enabled = true,
+                    densityRange   = new Vector2(0.04f, 0.28f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 0.3f),
+                    gradientFalloff = RampDownCurve(),
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.40f, 0.50f, 0.70f)),
                         (0.5f, new Color(0.55f, 0.65f, 0.82f)),
-                        (1f, new Color(0.7f, 0.8f, 0.92f))),
-                    baseOpacity = 0.04f,
-                    boundaryBoost = 0f,
-                    weight = 1f,
-                    enabled = true
+                        (1f, new Color(0.70f, 0.80f, 0.92f))),
+                    baseOpacity = 0.03f,
+                    weight = 1f
                 },
-                // Airway walls: gradient-gated boundaries in lung density range
+
+                // Airway WALLS — high gradient in lung density range
                 new TF2DRegion
                 {
                     name = "Airway Walls",
-                    densityRange = new Vector2(0.08f, 0.28f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.3f, 1.0f),
-                    gradientFalloff = HighPassFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.3f, 0.45f, 0.65f)),
-                        (1f, new Color(0.5f, 0.65f, 0.85f))),
-                    baseOpacity = 0.4f,
-                    boundaryBoost = 0.4f,
-                    boundaryThreshold = 0.35f,
-                    weight = 1.2f,
-                    enabled = true
+                    enabled = true,
+                    densityRange   = new Vector2(0.06f, 0.30f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.2f, 1.0f),
+                    gradientFalloff = RampUpCurve(),
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.30f, 0.45f, 0.65f)),
+                        (1f, new Color(0.50f, 0.65f, 0.85f))),
+                    baseOpacity = 0.35f,
+                    boundaryBoost = 0.45f,
+                    boundaryThreshold = 0.4f,
+                    weight = 1.2f
                 },
-                // Soft tissue
+
+                // Soft tissue — slight transparency
                 new TF2DRegion
                 {
                     name = "Soft Tissue",
-                    densityRange = new Vector2(0.3f, 0.55f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.75f, 0.55f, 0.5f)),
+                    enabled = true,
+                    densityRange   = new Vector2(0.28f, 0.55f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.75f, 0.55f, 0.50f)),
                         (1f, new Color(0.88f, 0.68f, 0.62f))),
-                    baseOpacity = 0.1f,
+                    baseOpacity = 0.08f,
                     boundaryBoost = 0.15f,
-                    boundaryThreshold = 0.3f,
-                    weight = 1f,
-                    enabled = true
+                    boundaryThreshold = 0.35f,
+                    weight = 1f
                 },
-                // Nodules/dense structures: sharp, attention-grabbing
+
+                // Nodules / dense structures — sharp, high-gradient gated
                 new TF2DRegion
                 {
                     name = "Nodules",
-                    densityRange = new Vector2(0.4f, 0.65f),
-                    densityFalloff = SharpFalloff,
-                    gradientRange = new Vector2(0.25f, 1.0f),
-                    gradientFalloff = HighPassFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.95f, 0.8f, 0.2f)),
-                        (0.5f, new Color(1.0f, 0.9f, 0.3f)),
-                        (1f, new Color(1.0f, 0.95f, 0.5f))),
-                    baseOpacity = 0.85f,
-                    boundaryBoost = 0.15f,
-                    boundaryThreshold = 0.3f,
-                    weight = 1.3f,
-                    enabled = true
+                    enabled = true,
+                    densityRange   = new Vector2(0.38f, 0.68f),
+                    densityFalloff = SharpDensityFalloff(),
+                    gradientRange  = new Vector2(0.2f, 1.0f),
+                    gradientFalloff = RampUpCurve(),
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.95f, 0.80f, 0.20f)),
+                        (0.5f, new Color(1.0f, 0.90f, 0.30f)),
+                        (1f, new Color(1.0f, 0.95f, 0.50f))),
+                    baseOpacity = 0.80f,
+                    boundaryBoost = 0.20f,
+                    boundaryThreshold = 0.35f,
+                    weight = 1.3f
                 },
+
+                // Bone — subdued
                 new TF2DRegion
                 {
                     name = "Bone",
-                    densityRange = new Vector2(0.55f, 1.0f),
-                    densityFalloff = SmoothFalloff,
-                    gradientRange = new Vector2(0.0f, 1.0f),
-                    gradientFalloff = FlatFalloff,
-                    colorGradient = CreateGradient(
-                        (0f, new Color(0.9f, 0.88f, 0.82f)),
+                    enabled = true,
+                    densityRange   = new Vector2(0.55f, 1.0f),
+                    densityFalloff = SmoothDensityFalloff(),
+                    gradientRange  = new Vector2(0.0f, 1.0f),
+                    gradientFalloff = FlatCurve(),
+                    colorGradient  = CreateGradient(
+                        (0f, new Color(0.90f, 0.88f, 0.82f)),
                         (1f, new Color(1.0f, 1.0f, 0.95f))),
-                    baseOpacity = 0.5f,
-                    boundaryBoost = 0f,
-                    weight = 0.8f,
-                    enabled = true
+                    baseOpacity = 0.45f,
+                    weight = 0.8f
                 }
             };
         }
@@ -755,7 +837,7 @@ public class TransferFunction2DGenerator : MonoBehaviour
 }
 
 // =============================================================================
-// Custom Editor with texture preview
+// Custom Editor with texture preview and debug visualization
 // =============================================================================
 #if UNITY_EDITOR
 [CustomEditor(typeof(TransferFunction2DGenerator))]
@@ -823,7 +905,7 @@ public class TransferFunction2DGeneratorEditor : Editor
             if (showPreview)
             {
                 EditorGUILayout.LabelField(
-                    $"  X = Windowed Density →    Y = Gradient Magnitude ↑");
+                    "  X = Density →    Y = Gradient Magnitude ↑");
 
                 float previewSize = EditorGUIUtility.currentViewWidth - 40;
                 previewSize = Mathf.Min(previewSize, 400);
@@ -831,13 +913,11 @@ public class TransferFunction2DGeneratorEditor : Editor
                 Rect r = GUILayoutUtility.GetRect(previewSize, previewSize);
                 EditorGUI.DrawPreviewTexture(r, tex);
 
-                // axis labels
                 Rect xLabel = new Rect(r.x, r.yMax + 2, r.width, 16);
                 EditorGUI.LabelField(xLabel,
-                    "0                              Density →                              1",
+                    "0                    Density →                    1",
                     EditorStyles.miniLabel);
 
-                // Save to assets
                 EditorGUILayout.Space(5);
                 if (GUILayout.Button("Save Texture as Asset"))
                 {
