@@ -1,0 +1,390 @@
+// =====================================================================
+        // DEPTH ONLY PASS
+        // =====================================================================
+        Pass
+        {
+            Name "DepthOnly"
+            Tags { "LightMode"="DepthOnly" }
+            ZWrite On
+            ColorMask 0
+            Cull Front
+
+            HLSLPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma target 3.5
+
+            #pragma multi_compile _MODE_DVR _MODE_SUR _MODE_MIP
+            #pragma multi_compile _ CROSS_SECTION_ON
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+            CBUFFER_START(UnityPerMaterial)
+                float _WindowCenter;
+                float _WindowWidth;
+                float _OriginWindowCenter;
+                float _OriginWindowWidth;
+                float _MinVal;
+                float _MaxVal;
+                float _DepthAlphaThreshold;
+                float _ExtinctionScale;
+            CBUFFER_END
+
+            sampler3D _VolumeDataTexture;
+            sampler2D _TransferFunctionTexture;
+
+            struct Attributes { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+            struct Varyings
+            {
+                float4 posCS      : SV_POSITION;
+                float3 vertLocal  : TEXCOORD0;
+                float2 uv         : TEXCOORD1;
+            };
+
+            float DensityToHU(float d)
+            {
+                return d * _OriginWindowWidth
+                     + (_OriginWindowCenter - _OriginWindowWidth * 0.5);
+            }
+            float ApplyWindowing(float hu)
+            {
+                return saturate((hu - (_WindowCenter - _WindowWidth * 0.5))
+                                / _WindowWidth);
+            }
+            float ComputeExtinction(float a)
+            {
+                return -log(max(1.0 - a, 1e-4)) * _ExtinctionScale;
+            }
+
+            float3 GetViewRayDir(float3 vl)
+            {
+                float3 c = mul(unity_WorldToObject,
+                               float4(_WorldSpaceCameraPos, 1)).xyz;
+                if (unity_OrthoParams.w == 0) return normalize(vl - c);
+                float3 f = -UNITY_MATRIX_V[2].xyz;
+                return normalize(mul((float3x3)unity_WorldToObject, f));
+            }
+
+            float2 IntersectAABB(float3 o, float3 d, float3 mn, float3 mx)
+            {
+                float3 inv = 1.0 / d;
+                float3 t0 = (mn - o) * inv, t1 = (mx - o) * inv;
+                float3 tlo = min(t0,t1), thi = max(t0,t1);
+                return float2(max(max(tlo.x,tlo.y),tlo.z),
+                              min(min(thi.x,thi.y),thi.z));
+            }
+
+            float LocalToDepth(float3 lp)
+            {
+                float4 c = TransformObjectToHClip(float4(lp, 1));
+                #if defined(SHADER_API_GLCORE)||defined(SHADER_API_OPENGL) \
+                 ||defined(SHADER_API_GLES)||defined(SHADER_API_GLES3)
+                    return (c.z/c.w)*0.5+0.5;
+                #else
+                    return c.z/c.w;
+                #endif
+            }
+
+            #if defined(CROSS_SECTION_ON)
+                float4x4 _CrossSectionMatrices[8];
+                float    _CrossSectionTypes[8];
+                int      _NumCrossSections;
+                bool IsCutout(float3 p)
+                {
+                    float4 pp = float4(p - 0.5, 1); bool cut = false;
+                    for (int i = 0; i < _NumCrossSections && !cut; i++)
+                    {
+                        int t = (int)_CrossSectionTypes[i];
+                        float3 s = mul(_CrossSectionMatrices[i], pp).xyz;
+                        if      (t==1) cut = s.z > 0;
+                        else if (t==2) cut = any(abs(s) > 0.5);
+                        else if (t==3) cut = all(abs(s) <= 0.5);
+                        else if (t==4) cut = length(s) > 0.5;
+                        else if (t==5) cut = length(s) < 0.5;
+                    }
+                    return cut;
+                }
+            #endif
+
+            Varyings vert(Attributes i)
+            {
+                Varyings o;
+                o.posCS     = TransformObjectToHClip(i.pos.xyz);
+                o.vertLocal = i.pos.xyz;
+                o.uv        = i.uv;
+                return o;
+            }
+
+            float frag(Varyings i) : SV_DEPTH
+            {
+                float3 cam = mul(unity_WorldToObject,
+                                 float4(_WorldSpaceCameraPos,1)).xyz;
+                float3 rd  = GetViewRayDir(i.vertLocal);
+                float3 ro  = (unity_OrthoParams.w == 0)
+                           ? cam + 0.5 : i.vertLocal + 0.5;
+
+                float2 is = IntersectAABB(ro, rd, 0, 1);
+                is.x = max(is.x, 0);
+                if (is.x > is.y) { discard; return 1; }
+
+                float3 rs = ro + rd * is.x;
+                float3 re = ro + rd * is.y;
+                float  rl = is.y - is.x;
+                const int N = 128;
+                float ds = rl / (float)N;
+                float acc = 0;
+
+                for (int s = 0; s < N; s++)
+                {
+                    float  t = (float)s / (float)N;
+                    float3 p = lerp(rs, re, t);
+                    if (any(p < 0) || any(p > 1)) continue;
+                    #if defined(CROSS_SECTION_ON)
+                        if (IsCutout(p)) continue;
+                    #endif
+                    float w = ApplyWindowing(DensityToHU(
+                        tex3Dlod(_VolumeDataTexture, float4(p,0)).r));
+                    if (w < _MinVal || w > _MaxVal) continue;
+                    float a = tex2Dlod(_TransferFunctionTexture,
+                                       float4(w,0,0,0)).a;
+                    #if _MODE_DVR
+                        float ext = ComputeExtinction(a);
+                        float sa  = 1.0 - exp(-ext * ds);
+                        acc += (1.0 - acc) * sa;
+                        if (acc > _DepthAlphaThreshold)
+                            return LocalToDepth(p - 0.5);
+                    #else
+                        if (a > 0.1) return LocalToDepth(p - 0.5);
+                    #endif
+                }
+                discard; return 1;
+            }
+            ENDHLSL
+        }
+
+        // =====================================================================
+        // DEPTH NORMALS PASS
+        // =====================================================================
+        Pass
+        {
+            Name "DepthNormals"
+            Tags { "LightMode"="DepthNormals" }
+            ZWrite On
+            Cull Front
+
+            HLSLPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma target 3.5
+
+            #pragma multi_compile _MODE_DVR _MODE_SUR _MODE_MIP
+            #pragma multi_compile _ GRADIENT_TEXTURE
+            #pragma multi_compile _ CROSS_SECTION_ON
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+            CBUFFER_START(UnityPerMaterial)
+                float _WindowCenter;
+                float _WindowWidth;
+                float _OriginWindowCenter;
+                float _OriginWindowWidth;
+                float _MinVal;
+                float _MaxVal;
+                float _DepthAlphaThreshold;
+                float _MinGradient;
+                float _GradientDelta;
+                float _ExtinctionScale;
+            CBUFFER_END
+
+            sampler3D _VolumeDataTexture;
+            sampler3D _GradientTexture;
+            sampler2D _TransferFunctionTexture;
+
+            struct Attributes { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+            struct Varyings
+            {
+                float4 posCS     : SV_POSITION;
+                float3 vertLocal : TEXCOORD0;
+                float2 uv        : TEXCOORD1;
+            };
+            struct FOut { float4 normalWS : SV_Target0; float depth : SV_Depth; };
+
+            float DensityToHU(float d)
+            {
+                return d * _OriginWindowWidth
+                     + (_OriginWindowCenter - _OriginWindowWidth * 0.5);
+            }
+            float ApplyWindowing(float hu)
+            {
+                return saturate((hu - (_WindowCenter - _WindowWidth * 0.5))
+                                / _WindowWidth);
+            }
+            float SampleDensity(float3 p)
+            {
+                return tex3Dlod(_VolumeDataTexture, float4(p,0)).r;
+            }
+            float3 SampleGradient(float3 p)
+            {
+                #if defined(GRADIENT_TEXTURE)
+                    return tex3Dlod(_GradientTexture, float4(p,0)).rgb*2-1;
+                #else
+                    float d = _GradientDelta; float3 g;
+                    g.x = SampleDensity(p+float3(d,0,0))-SampleDensity(p-float3(d,0,0));
+                    g.y = SampleDensity(p+float3(0,d,0))-SampleDensity(p-float3(0,d,0));
+                    g.z = SampleDensity(p+float3(0,0,d))-SampleDensity(p-float3(0,0,d));
+                    return g/(2.0*d);
+                #endif
+            }
+            float ComputeExtinction(float a)
+            {
+                return -log(max(1.0-a,1e-4))*_ExtinctionScale;
+            }
+
+            float3 GetViewRayDir(float3 vl)
+            {
+                float3 c = mul(unity_WorldToObject,
+                               float4(_WorldSpaceCameraPos,1)).xyz;
+                if (unity_OrthoParams.w==0) return normalize(vl-c);
+                float3 f = -UNITY_MATRIX_V[2].xyz;
+                return normalize(mul((float3x3)unity_WorldToObject,f));
+            }
+            float2 IntersectAABB(float3 o, float3 d, float3 mn, float3 mx)
+            {
+                float3 inv=1.0/d;
+                float3 t0=(mn-o)*inv, t1=(mx-o)*inv;
+                float3 tlo=min(t0,t1), thi=max(t0,t1);
+                return float2(max(max(tlo.x,tlo.y),tlo.z),
+                              min(min(thi.x,thi.y),thi.z));
+            }
+            float LocalToDepth(float3 lp)
+            {
+                float4 c=TransformObjectToHClip(float4(lp,1));
+                #if defined(SHADER_API_GLCORE)||defined(SHADER_API_OPENGL) \
+                 ||defined(SHADER_API_GLES)||defined(SHADER_API_GLES3)
+                    return (c.z/c.w)*0.5+0.5;
+                #else
+                    return c.z/c.w;
+                #endif
+            }
+
+            #if defined(CROSS_SECTION_ON)
+                float4x4 _CrossSectionMatrices[8];
+                float    _CrossSectionTypes[8];
+                int      _NumCrossSections;
+                bool IsCutout(float3 p)
+                {
+                    float4 pp=float4(p-0.5,1); bool cut=false;
+                    for(int i=0;i<_NumCrossSections&&!cut;i++){
+                        int t=(int)_CrossSectionTypes[i];
+                        float3 s=mul(_CrossSectionMatrices[i],pp).xyz;
+                        if(t==1)cut=s.z>0;
+                        else if(t==2)cut=any(abs(s)>0.5);
+                        else if(t==3)cut=all(abs(s)<=0.5);
+                        else if(t==4)cut=length(s)>0.5;
+                        else if(t==5)cut=length(s)<0.5;
+                    }
+                    return cut;
+                }
+            #endif
+
+            Varyings vert(Attributes i)
+            {
+                Varyings o;
+                o.posCS     = TransformObjectToHClip(i.pos.xyz);
+                o.vertLocal = i.pos.xyz;
+                o.uv        = i.uv;
+                return o;
+            }
+
+            FOut frag(Varyings inp)
+            {
+                FOut o; o.normalWS = float4(0,0,1,0); o.depth = 1;
+
+                float3 cam = mul(unity_WorldToObject,
+                                 float4(_WorldSpaceCameraPos,1)).xyz;
+                float3 rd  = GetViewRayDir(inp.vertLocal);
+                float3 vd  = -rd;
+                float3 ro  = (unity_OrthoParams.w==0)?cam+0.5:inp.vertLocal+0.5;
+                float2 is  = IntersectAABB(ro,rd,0,1);
+                is.x = max(is.x,0);
+                if (is.x > is.y) { discard; return o; }
+
+                float3 rs = ro+rd*is.x, re = ro+rd*is.y;
+                float  rl = is.y-is.x;
+                const int N = 128;
+                float ds = rl/(float)N;
+
+                float3 accN = 0; float accW = 0; float accA = 0;
+                float3 hitP = rs; bool hasHit = false;
+
+                for (int s = 0; s < N; s++)
+                {
+                    float t = (float)s/(float)N;
+                    float3 p = lerp(rs,re,t);
+                    if (any(p<0)||any(p>1)) continue;
+                    #if defined(CROSS_SECTION_ON)
+                        if (IsCutout(p)) continue;
+                    #endif
+                    float w = ApplyWindowing(DensityToHU(
+                        tex3Dlod(_VolumeDataTexture,float4(p,0)).r));
+                    if (w<_MinVal||w>_MaxVal) continue;
+                    float4 tf = tex2Dlod(_TransferFunctionTexture,float4(w,0,0,0));
+                    if (tf.a < 0.001) continue;
+
+                    float3 g = SampleGradient(p);
+                    float  gm = length(g);
+
+                    #if _MODE_DVR
+                        float ext = ComputeExtinction(tf.a);
+                        float sa  = 1.0-exp(-ext*ds);
+                        if (gm > 0.01)
+                        {
+                            float3 n = g/gm;
+                            if (dot(n,vd)<0) n=-n;
+                            float wgt = sa*(1.0-accA);
+                            accN += n*wgt; accW += wgt;
+                        }
+                        accA += (1.0-accA)*sa;
+                        if (!hasHit && accA >= _DepthAlphaThreshold)
+                        { hitP = p; hasHit = true; }
+                        if (accA > 0.95) break;
+                    #elif _MODE_SUR
+                        if (gm > _MinGradient)
+                        {
+                            float3 n = g/gm;
+                            if(dot(n,vd)<0)n=-n;
+                            float3 nw = normalize(
+                                mul((float3x3)unity_ObjectToWorld,n));
+                            o.normalWS = float4(nw*0.5+0.5,0);
+                            o.depth = LocalToDepth(p-0.5);
+                            return o;
+                        }
+                    #elif _MODE_MIP
+                        if (tf.a > 0.1)
+                        {
+                            float3 n = gm>0.01 ? g/gm : vd;
+                            if(dot(n,vd)<0)n=-n;
+                            float3 nw = normalize(
+                                mul((float3x3)unity_ObjectToWorld,n));
+                            o.normalWS = float4(nw*0.5+0.5,0);
+                            o.depth = LocalToDepth(p-0.5);
+                            return o;
+                        }
+                    #endif
+                }
+
+                #if _MODE_DVR
+                    if (hasHit && accW > 0.001)
+                    {
+                        float3 fn = accN/accW;
+                        float3 nw = normalize(
+                            mul((float3x3)unity_ObjectToWorld,fn));
+                        o.normalWS = float4(nw*0.5+0.5,0);
+                        o.depth = LocalToDepth(hitP-0.5);
+                        return o;
+                    }
+                #endif
+                discard; return o;
+            }
+            ENDHLSL
+        }

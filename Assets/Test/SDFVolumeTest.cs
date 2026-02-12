@@ -141,7 +141,7 @@ public class SDFVolumeTest : MonoBehaviour
 
             if (DebugObject != null)
             {
-                DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_DataTex", _sdfTex);
+                DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_VolumeDataTexture", _sdfTex);
                 DebugObject.transform.position = WorldBounds.center;
                 DebugObject.transform.rotation = Quaternion.identity;
                 DebugObject.transform.localScale = WorldBounds.size;
@@ -202,7 +202,7 @@ public class SDFVolumeTest : MonoBehaviour
             _nextUpdateTime = currentTime + MinUpdateInterval;
             if (DebugObject != null)
             {
-                DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_DataTex", _sdfTex);
+                DebugObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_VolumeDataTexture", _sdfTex);
                 DebugObject.transform.position = WorldBounds.center;
                 DebugObject.transform.rotation = Quaternion.identity;
                 DebugObject.transform.localScale = WorldBounds.size;
