@@ -13,7 +13,7 @@ Material:
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords:
   - _DEBUG_NONE
-  - _MODE_SUR
+  - _MODE_DVR
   - _TF_TEX2D
   m_InvalidKeywords: []
   m_LightmapFlags: 4
@@ -151,6 +151,7 @@ Material:
     - _EnableNoise: 0
     - _EnableSSS: 0
     - _EnableShadows: 0
+    - _EnableSmoothGradient: 1
     - _EnableToneMapping: 0
     - _EnvironmentReflections: 1
     - _Exposure: 10
@@ -161,21 +162,26 @@ Material:
     - _Glossiness: 0
     - _GlossyReflections: 0
     - _GradientDelta: 0.005
+    - _GradientSmoothBlend: 0.4
+    - _GradientSmoothScale: 2
     - _LightIntensity: 1.5
     - _LightingGradientThresholdEnd: 0.5
     - _LightingGradientThresholdStart: 0
-    - _MODE: 1
+    - _MODE: 0
     - _MaxGradientMagnitude: 1.07
     - _MaxRayMarchingSteps: 512
     - _MaxVal: 1
     - _Metallic: 0
     - _MinGradient: 0
     - _MinVal: 0
+    - _MultiScatterPhaseAtten: 0.5
+    - _MultiScatterStrength: 0.35
     - _NoiseScale: 50
     - _OcclusionStrength: 1
     - _OriginWindowCenter: 3000
     - _OriginWindowWidth: 2000
     - _Parallax: 0.005
+    - _PhaseIntensityClamp: 3
     - _QueueControl: 0
     - _QueueOffset: 0
     - _ReceiveShadows: 1
@@ -185,6 +191,7 @@ Material:
     - _SSSStrength: 0.5
     - _SampleRateMultiplier: 1
     - _Saturation: 1
+    - _ShadowColorAbsorption: 0.5
     - _ShadowDensity: 1
     - _ShadowIntensity: 1
     - _ShadowMaxDist: 0.3
@@ -197,6 +204,9 @@ Material:
     - _SpecularStrength: 0.5
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
+    - _SubsurfaceDistortion: 0.3
+    - _SubsurfacePower: 4
+    - _SubsurfaceStrength: 0.6
     - _Surface: 0
     - _SurfaceBlendEnd: 0.5
     - _SurfaceBlendStart: 0.15
@@ -214,6 +224,7 @@ Material:
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _SSSColor: {r: 1, g: 0.39999998, b: 0.29999998, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
+    - _SubsurfaceColor: {r: 1, g: 0.34999996, b: 0.19999996, a: 1}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
 --- !u!114 &1118635344621861009
