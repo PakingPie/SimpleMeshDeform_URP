@@ -1,0 +1,50 @@
+﻿#region
+
+using EvilDICOM.Core;
+
+#endregion
+
+namespace EvilDICOM.Anonymization.Anonymizers
+{
+    /// <summary>
+    /// Replaces patient identifier with specified name and id
+    /// </summary>
+    public class PatientIdAnonymizer : IAnonymizer
+    {
+        public PatientIdAnonymizer(string firstName, string lastName, string id)
+        {
+            FirstName = firstName;
+            LastName = lastName;
+            Id = id;
+        }
+
+        /// <summary>
+        /// The first name to make the new patient Id
+        /// </summary>
+        public string FirstName { get; set; }
+
+        /// <summary>
+        /// The last name to make the new patient Id
+        /// </summary>
+        public string LastName { get; set; }
+
+        /// <summary>
+        /// The new id for the anonymized file
+        /// </summary>
+        public string Id { get; set; }
+
+        public void Anonymize(DICOMObject d)
+        {
+            //PATIENTS NAME
+            var name = DICOMForge.Patient​Name();
+            name.FirstName = FirstName;
+            name.LastName = LastName;
+            d.ReplaceOrAdd(name);
+
+            //PATIENT ID
+            var id = DICOMForge.Patient​ID();
+            id.Data = Id;
+            d.ReplaceOrAdd(id);
+        }
+    }
+}
