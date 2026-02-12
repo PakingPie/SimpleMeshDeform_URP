@@ -40,6 +40,9 @@ public class DICOMProcessor : MonoBehaviour
 
     public GameObject LoadingPanel;
     private DICOMObject _firstDICOM;
+    // Add these two fields to the class
+    private float _maxGradientMagnitude;
+    private readonly object _gradientMaxLock = new object();
     public void InitializeFilePaths()
     {
         _filePaths = System.IO.Directory.GetFiles(folderPath, "*.dcm");
@@ -137,9 +140,16 @@ public class DICOMProcessor : MonoBehaviour
                 for (int x = 0; x < rows; x++)
                 {
                     int pixelIndex = y * rows + x;
-                    float hu = (Byte)pixelData[pixelIndex * 2] + 256 * (Byte)pixelData[pixelIndex * 2 + 1];
-                    hu = Mathf.Clamp(hu, -1024, 3072);
-                    hu = rescaleIntercept + rescaleSlope * hu;
+                    float raw = (Byte)pixelData[pixelIndex * 2]
+          + 256 * (Byte)pixelData[pixelIndex * 2 + 1];
+
+                    // Handle signed pixel representation (PixelRepresentation = 1)
+                    // Uncomment if your DICOM uses signed 16-bit:
+                    // if (raw > 32767) raw -= 65536;
+
+                    float hu = rescaleIntercept + rescaleSlope * raw;
+                    hu = Mathf.Clamp(hu, -1024f, 3071f);  // clamp AFTER conversion to HU
+
                     _minVal = Mathf.Min(_minVal, hu);
                     _maxVal = Mathf.Max(_maxVal, hu);
                     huList[pixelIndex] = hu;
@@ -259,41 +269,61 @@ public class DICOMProcessor : MonoBehaviour
 
     private void GenerateGradientData(IProgress<float> progress)
     {
-        float maxRange = _maxVal - _minVal;
-
-        // 还原原始HU值用于梯度计算
-        float[] originalData = new float[_volumeData.Length];
-        for (int i = 0; i < _volumeData.Length; i++)
-        {
-            originalData[i] = _volumeData[i] * maxRange + _minVal;
-        }
-
-        _gradientData = new float[_texWidth * _texHeight * _texDepth * 4]; // RGBA
+        _gradientData = new float[_texWidth * _texHeight * _texDepth * 4];
+        _maxGradientMagnitude = 0f;
 
         Parallel.For(0, _texDepth, z =>
         {
+            float localMax = 0f;
+
             for (int y = 0; y < _texHeight; y++)
             {
                 for (int x = 0; x < _texWidth; x++)
                 {
-                    int dataIndex = x + y * _texWidth + z * _texWidth * _texHeight;
-                    Vector3 grad = GetGrad(originalData, x, y, z, _texWidth, _texHeight, _texDepth, _minVal, maxRange);
+                    int idx = x + y * _texWidth + z * _texWidth * _texHeight;
 
-                    int gradIndex = dataIndex * 4;
-                    _gradientData[gradIndex] = grad.x;
-                    _gradientData[gradIndex + 1] = grad.y;
-                    _gradientData[gradIndex + 2] = grad.z;
-                    _gradientData[gradIndex + 3] = (originalData[dataIndex] - _minVal) / maxRange;
+                    // Sample neighbors from the NORMALIZED [0,1] volume data
+                    float xp = _volumeData[Math.Min(x + 1, _texWidth - 1) + y * _texWidth + z * _texWidth * _texHeight];
+                    float xn = _volumeData[Math.Max(x - 1, 0) + y * _texWidth + z * _texWidth * _texHeight];
+                    float yp = _volumeData[x + Math.Min(y + 1, _texHeight - 1) * _texWidth + z * _texWidth * _texHeight];
+                    float yn = _volumeData[x + Math.Max(y - 1, 0) * _texWidth + z * _texWidth * _texHeight];
+                    float zp = _volumeData[x + y * _texWidth + Math.Min(z + 1, _texDepth - 1) * _texWidth * _texHeight];
+                    float zn = _volumeData[x + y * _texWidth + Math.Max(z - 1, 0) * _texWidth * _texHeight];
+
+                    // Simple central differences: (forward - backward) / 2
+                    // Same sign convention as the shader's CentralDiffGradient
+                    // Values range [-0.5, 0.5] per component
+                    float gx = (xp - xn) * 0.5f;
+                    float gy = (yp - yn) * 0.5f;
+                    float gz = (zp - zn) * 0.5f;
+
+                    float mag = Mathf.Sqrt(gx * gx + gy * gy + gz * gz);
+                    localMax = Mathf.Max(localMax, mag);
+
+                    int gi = idx * 4;
+                    _gradientData[gi] = gx;   // raw — RGBAHalf handles [-0.5, 0.5]
+                    _gradientData[gi + 1] = gy;
+                    _gradientData[gi + 2] = gz;
+                    _gradientData[gi + 3] = _volumeData[idx]; // density for 2D TF
                 }
             }
+
+            // Thread-safe max update
+            lock (_gradientMaxLock)
+            {
+                if (localMax > _maxGradientMagnitude)
+                    _maxGradientMagnitude = localMax;
+            }
         });
+
+        Debug.Log($"Gradient texture: max magnitude = {_maxGradientMagnitude:F4}");
     }
 
     private async Task CreateAndUploadTexturesAsync()
     {
         // 创建体积纹理
         _volumeDataTexture = new Texture3D(_texWidth, _texHeight, _texDepth, TextureFormat.RHalf, false);
-        _volumeDataTexture.filterMode = FilterMode.Point;
+        _volumeDataTexture.filterMode = FilterMode.Bilinear;
         _volumeDataTexture.wrapMode = TextureWrapMode.Clamp;
 
         // 分批上传数据以避免卡顿
@@ -320,20 +350,33 @@ public class DICOMProcessor : MonoBehaviour
         }
 
         _volumeDataTexture.Apply();
-        VolumeObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_VolumeDataTexture", _volumeDataTexture);
+        var mat = VolumeObject.GetComponent<MeshRenderer>().sharedMaterial;
+        mat.SetTexture("_VolumeDataTexture", _volumeDataTexture);
 
-        // 创建梯度纹理
+        // ---- SET WINDOWING PARAMETERS ----
+        float originWidth = _maxVal - _minVal;
+        float originCenter = (_maxVal + _minVal) * 0.5f;
+        mat.SetFloat("_OriginWindowWidth", originWidth);
+        mat.SetFloat("_OriginWindowCenter", originCenter);
+
+        // Sensible default viewing window (soft-tissue)
+        mat.SetFloat("_WindowCenter", 40f);
+        mat.SetFloat("_WindowWidth", 400f);
+
+        Debug.Log($"Volume HU range: [{_minVal:F0}, {_maxVal:F0}]  " + $"→ OriginCenter={originCenter:F0}, OriginWidth={originWidth:F0}");
+
         if (GenerateGradientTexture && _gradientData != null)
         {
             _gradientTexture = new Texture3D(_texWidth, _texHeight, _texDepth, TextureFormat.RGBAHalf, false);
-            _gradientTexture.filterMode = FilterMode.Point;
+            _gradientTexture.filterMode = FilterMode.Bilinear;
             _gradientTexture.wrapMode = TextureWrapMode.Clamp;
 
             Color[] gradColors = new Color[_texWidth * _texHeight * _texDepth];
             for (int i = 0; i < gradColors.Length; i++)
             {
                 int gi = i * 4;
-                gradColors[i] = new Color(_gradientData[gi], _gradientData[gi + 1], _gradientData[gi + 2], _gradientData[gi + 3]);
+                gradColors[i] = new Color(_gradientData[gi], _gradientData[gi + 1],
+                                          _gradientData[gi + 2], _gradientData[gi + 3]);
             }
 
             _gradientTexture.SetPixels(gradColors);
@@ -341,8 +384,13 @@ public class DICOMProcessor : MonoBehaviour
             await Task.Yield();
 
             _gradientTexture.Apply();
-            VolumeObject.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_GradientTexture", _gradientTexture);
-            VolumeObject.GetComponent<MeshRenderer>().sharedMaterial.EnableKeyword("GRADIENT_TEXTURE");
+            mat.SetTexture("_GradientTexture", _gradientTexture);
+            mat.EnableKeyword("GRADIENT_TEXTURE");
+
+            // ---- AUTO-SET gradient magnitude so normGrad spans [0, 1] properly ----
+            float safeMax = Mathf.Max(_maxGradientMagnitude, 0.01f);
+            mat.SetFloat("_MaxGradientMagnitude", safeMax);
+            Debug.Log($"Set _MaxGradientMagnitude = {safeMax:F4}");
         }
     }
 
@@ -353,7 +401,9 @@ public class DICOMProcessor : MonoBehaviour
         go.transform.localPosition = newPos;
     }
 
-    public Vector3 GetGrad(float[] data, int x, int y, int z, int dimX, int dimY, int dimZ, float minVal, float maxRange)
+    public Vector3 GetGrad(float[] data, int x, int y, int z,
+                        int dimX, int dimY, int dimZ,
+                        float minVal, float maxRange)
     {
         float x1 = data[Math.Min(x + 1, dimX - 1) + y * dimX + z * dimX * dimY] - minVal;
         float x2 = data[Math.Max(x - 1, 0) + y * dimX + z * dimX * dimY] - minVal;
@@ -361,7 +411,12 @@ public class DICOMProcessor : MonoBehaviour
         float y2 = data[x + Math.Max(y - 1, 0) * dimX + z * dimX * dimY] - minVal;
         float z1 = data[x + y * dimX + Math.Min(z + 1, dimZ - 1) * dimX * dimY] - minVal;
         float z2 = data[x + y * dimX + Math.Max(z - 1, 0) * dimX * dimY] - minVal;
-        return new Vector3((x2 - x1) / maxRange, (y2 - y1) / maxRange, (z2 - z1) / maxRange);
+
+        // FIX: divide by 2 for proper central differences
+        float invScale = 1.0f / (2.0f * maxRange);
+        return new Vector3((x2 - x1) * invScale,
+                           (y2 - y1) * invScale,
+                           (z2 - z1) * invScale);
     }
 
     public void CleanUpDICOMData()
